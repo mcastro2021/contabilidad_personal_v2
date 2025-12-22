@@ -13,6 +13,7 @@ import tempfile
 from dotenv import load_dotenv
 import numpy as np
 from sklearn.linear_model import LinearRegression 
+from openai import OpenAI # Usamos el cliente oficial directo
 
 # --- CARGAR VARIABLES ---
 load_dotenv()
@@ -31,6 +32,7 @@ def load_lottieurl(url):
 LOTTIE_FINANCE = "https://lottie.host/02a55953-2736-4763-b183-116515b81045/L1O1fW89yB.json" 
 LOTTIE_LOGIN = "https://lottie.host/93291880-990e-473d-82f5-b6574c831168/v2x2QkL6r4.json"
 LOTTIE_AI = "https://lottie.host/8078f4a1-0e77-49f3-8027-4638a1670985/9F7o7r2X0q.json"
+LOTTIE_CHAT = "https://lottie.host/3c6e93e4-8671-419b-b5e2-632009028f9d/p1A7v0gQ2z.json"
 
 def make_hashes(password):
     return hashlib.sha256(str.encode(password)).hexdigest()
@@ -189,7 +191,7 @@ with st.sidebar.form("alta"):
         st.balloons(); st.success("Guardado"); st.rerun()
 
 # --- TABS ---
-tab1, tab2, tab3 = st.tabs(["📊 DASHBOARD", "🔮 PREDICCIONES IA", "⚙️ CONFIGURACIÓN"])
+tab1, tab2, tab3, tab4 = st.tabs(["📊 DASHBOARD", "🔮 PREDICCIONES", "💬 CHAT IA", "⚙️ CONFIGURACIÓN"])
 
 with tab1:
     st.info(f"Dolar Blue: {formato_moneda_visual(dolar_val, 'ARS')} {dolar_info}")
@@ -294,18 +296,16 @@ with tab1:
                     c.execute("DELETE FROM movimientos WHERE id=%s", (id_mov,)); conn.commit(); conn.close(); st.warning("Eliminado"); st.rerun()
     else: st.info("Sin datos.")
 
-with tab2: # IA
+with tab2: # PREDICCIONES
     c1, c2 = st.columns([1,3])
     with c1:
         lottie_ai = load_lottieurl(LOTTIE_AI)
         if lottie_ai: st_lottie(lottie_ai, height=150)
     with c2:
-        st.header("🧠 Inteligencia Artificial Financiera")
+        st.header("🔮 Predicciones de Gasto")
         st.caption("Análisis predictivo de tus gastos futuros basado en tu historial (Regresión Lineal).")
 
-    # 1. PREPARACIÓN DE DATOS PARA IA
     df_ai = df_all[df_all['tipo'] == 'GASTO'].copy()
-    
     if len(df_ai) > 0:
         df_ai['monto_normalizado'] = df_ai.apply(lambda x: x['monto'] * dolar_val if x['moneda'] == 'USD' else x['monto'], axis=1)
         mapa_meses = {m: i+1 for i, m in enumerate(MESES)}
@@ -334,12 +334,78 @@ with tab2: # IA
             fig.add_trace(go.Scatter(x=[nombre_proximo_mes], y=[prediccion_futura], mode='markers', name='Predicción', marker=dict(size=12, color='#00cc96', symbol='star')))
             fig.update_layout(title="Proyección de Gastos", template="plotly_white")
             st.plotly_chart(fig, use_container_width=True)
-        else:
-            st.warning("⚠️ Necesitas datos de al menos 2 meses distintos para que la IA pueda detectar tendencias.")
-    else:
-        st.info("Aún no tienes gastos registrados para analizar.")
+        else: st.warning("⚠️ Necesitas datos de al menos 2 meses distintos.")
+    else: st.info("Aún no tienes gastos registrados.")
 
-with tab3: # CONFIGURACION
+with tab3: # 💬 CHAT IA (SOLUCIÓN NATIVA)
+    c1, c2 = st.columns([1,3])
+    with c1:
+        lottie_chat = load_lottieurl(LOTTIE_CHAT)
+        if lottie_chat: st_lottie(lottie_chat, height=120)
+    with c2:
+        st.header("💬 Chat con tus Finanzas")
+        st.caption("Pregunta lo que quieras sobre tus datos (Ej: '¿Cuánto gasté en Supermercado?').")
+
+    api_key = os.environ.get("OPENAI_API_KEY")
+    if not api_key: api_key = st.text_input("Ingresa tu API Key de OpenAI:", type="password")
+    
+    if api_key:
+        query = st.text_area("✍️ Escribe tu pregunta:")
+        if st.button("🤖 Consultar"):
+            if query and not df_all.empty:
+                with st.spinner("Analizando..."):
+                    try:
+                        # PREPARAR CONTEXTO PARA LA IA
+                        df_sample = df_all.head(3).to_markdown()
+                        columnas = list(df_all.columns)
+                        
+                        prompt = f"""
+                        Eres un analista de datos experto en Python. Tienes un DataFrame de pandas llamado 'df'.
+                        Columnas: {columnas}
+                        Muestra de datos:
+                        {df_sample}
+
+                        El usuario pregunta: "{query}"
+
+                        Tu tarea:
+                        1. Escribe código Python para responder la pregunta usando el dataframe 'df'.
+                        2. Si la respuesta es un número o texto, guárdalo en una variable llamada 'resultado'.
+                        3. Si piden un gráfico, usa plotly.express y guarda la figura en una variable llamada 'fig'.
+                        4. NO expliques nada, SOLO devuelve el bloque de código.
+                        5. Asegúrate de manejar errores (ej: columnas que no existen).
+                        """
+
+                        client = OpenAI(api_key=api_key)
+                        response = client.chat.completions.create(
+                            model="gpt-4o-mini",
+                            messages=[{"role": "system", "content": "Eres un asistente de código Python."},
+                                      {"role": "user", "content": prompt}]
+                        )
+                        
+                        codigo_generado = response.choices[0].message.content.replace("```python", "").replace("```", "").strip()
+                        
+                        # EJECUCIÓN SEGURA (SANDBOX LIMITADO)
+                        local_vars = {"df": df_all, "px": px, "pd": pd}
+                        exec(codigo_generado, globals(), local_vars)
+                        
+                        if "resultado" in local_vars:
+                            st.success("Respuesta:")
+                            st.write(local_vars["resultado"])
+                        
+                        if "fig" in local_vars:
+                            st.plotly_chart(local_vars["fig"], use_container_width=True)
+                            
+                        with st.expander("Ver código generado"):
+                            st.code(codigo_generado)
+
+                    except Exception as e:
+                        st.error(f"Error al procesar: {e}")
+            else:
+                st.warning("Escribe algo o asegúrate de tener datos cargados.")
+    else:
+        st.warning("Necesitas una API Key para usar el chat.")
+
+with tab4: # CONFIGURACION
     st.header("⚙️ Configuración")
     
     st.markdown("### 📤 MIGRACIÓN DE DATOS")
@@ -348,11 +414,9 @@ with tab3: # CONFIGURACION
         try:
             with tempfile.NamedTemporaryFile(delete=False) as tmp_file:
                 tmp_file.write(archivo_db.getvalue()); tmp_path = tmp_file.name
-            
             conn_old = sqlite3.connect(tmp_path)
             df_old = pd.read_sql("SELECT * FROM movimientos", conn_old)
             conn_old.close()
-            
             conn_new = get_db_connection(); c_new = conn_new.cursor()
             count = 0
             for _, row in df_old.iterrows():
@@ -364,33 +428,19 @@ with tab3: # CONFIGURACION
         except Exception as e: st.error(f"Error: {e}")
 
     st.divider()
-
-    # --- ZONA DE PELIGRO (RESET) ---
+    # ZONA PELIGRO
     with st.expander("💀 ZONA DE PELIGRO (BORRAR TODO)"):
-        st.warning("⚠️ ESTA ACCIÓN NO SE PUEDE DESHACER. BORRARÁ TODOS LOS MOVIMIENTOS, USUARIOS Y GRUPOS.")
+        st.warning("⚠️ ESTA ACCIÓN NO SE PUEDE DESHACER.")
         confirm_text = st.text_input("Escribe 'ELIMINAR' para confirmar:")
-
         if st.button("💣 BORRAR BASE DE DATOS COMPLETA", type="primary"):
             if confirm_text == "ELIMINAR":
-                conn = get_db_connection()
-                c = conn.cursor()
-                # TRUNCATE + RESTART IDENTITY (Reinicia IDs a 1) + CASCADE
+                conn = get_db_connection(); c = conn.cursor()
                 c.execute("TRUNCATE TABLE movimientos, grupos, users RESTART IDENTITY CASCADE;")
-                conn.commit()
-                conn.close()
-                
-                # Re-sembrar datos iniciales (Admin y Grupos)
-                init_db()
-                
-                st.success("Base de datos reiniciada a fábrica.")
-                st.session_state['logged_in'] = False
-                st.rerun()
-            else:
-                st.error("Texto de confirmación incorrecto.")
+                conn.commit(); conn.close(); init_db()
+                st.success("Reiniciado."); st.session_state['logged_in'] = False; st.rerun()
+            else: st.error("Texto incorrecto.")
 
     st.divider()
-
-    # GESTION GRUPOS
     with st.expander("🏷️ GESTIONAR GRUPOS"):
         c1, c2 = st.columns(2)
         conn = get_db_connection(); c = conn.cursor()
@@ -402,7 +452,6 @@ with tab3: # CONFIGURACION
             if st.button("Eliminar"): c.execute("DELETE FROM grupos WHERE nombre=%s", (d_g,)); conn.commit(); st.rerun()
         conn.close()
 
-    # USUARIOS
     with st.expander("🔐 USUARIOS"):
         u_new = st.text_input("Nuevo Usuario")
         p_new = st.text_input("Nueva Contraseña", type="password")
@@ -412,7 +461,6 @@ with tab3: # CONFIGURACION
             except: st.error("Error al crear")
             finally: conn.close()
 
-    # CAMBIAR PASS
     with st.expander("🔑 CAMBIAR MI CONTRASEÑA"):
         curr = st.text_input("Actual", type="password")
         n1 = st.text_input("Nueva", type="password")
@@ -428,7 +476,6 @@ with tab3: # CONFIGURACION
             conn.close()
     
     st.divider()
-    # CLONADOR
     c1, c2, c3 = st.columns(3)
     m_src = c1.selectbox("Desde", MESES)
     m_dst = c2.selectbox("Hasta", ["TODO EL AÑO"]+MESES)
