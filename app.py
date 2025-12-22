@@ -4,17 +4,23 @@ import sqlite3
 import requests
 import datetime
 import plotly.express as px
+import hashlib
 
 # --- CONFIGURACIÓN ---
 st.set_page_config(page_title="SMART FINANCE PRO 2026", layout="wide")
 DB_NAME = "finanzas_2026.db"
 
-# --- FUNCIONES ---
+# --- FUNCIONES DE SEGURIDAD ---
+def make_hashes(password):
+    return hashlib.sha256(str.encode(password)).hexdigest()
+
+def check_hashes(password, hashed_text):
+    if make_hashes(password) == hashed_text:
+        return resulting_hash
+    return False
+
+# --- FUNCIONES DE FORMATO ---
 def formato_moneda_visual(valor, moneda):
-    """
-    Convierte valor numérico a formato visual con símbolo y puntuación Arg.
-    Ej: 1500.0 -> "$ 1.500,00" o "US$ 1.500,00"
-    """
     if valor is None or pd.isna(valor): return ""
     try:
         num = float(valor)
@@ -24,10 +30,6 @@ def formato_moneda_visual(valor, moneda):
     except: return str(valor)
 
 def procesar_monto_input(texto):
-    """
-    Limpia el texto con símbolos para guardar el número puro.
-    Ej: "$ 1.500,00" -> 1500.0
-    """
     if not texto: return 0.0
     try:
         if isinstance(texto, (int, float)): return float(texto)
@@ -39,16 +41,33 @@ def procesar_monto_input(texto):
 def init_db():
     conn = sqlite3.connect(DB_NAME)
     c = conn.cursor()
+    
+    # Tabla Movimientos
     c.execute('''CREATE TABLE IF NOT EXISTS movimientos 
                  (id INTEGER PRIMARY KEY AUTOINCREMENT, fecha TEXT, mes TEXT, 
                   tipo TEXT, grupo TEXT, tipo_gasto TEXT, cuota TEXT, monto REAL, moneda TEXT,
                   forma_pago TEXT, fecha_pago TEXT)''')
+    
+    # Tabla Grupos
     c.execute('''CREATE TABLE IF NOT EXISTS grupos (nombre TEXT PRIMARY KEY)''')
     
+    # Tabla Usuarios (NUEVA)
+    c.execute('''CREATE TABLE IF NOT EXISTS users 
+                 (username TEXT PRIMARY KEY, password TEXT)''')
+
+    # Datos Semilla Grupos
     c.execute("SELECT count(*) FROM grupos")
     if c.fetchone()[0] == 0:
         grupos_base = [("AHORRO MANUEL",), ("CASA",), ("AUTO",), ("VARIOS",)]
         c.executemany("INSERT OR IGNORE INTO grupos VALUES (?)", grupos_base)
+        
+    # Datos Semilla Usuario Admin (admin / admin123)
+    c.execute("SELECT count(*) FROM users")
+    if c.fetchone()[0] == 0:
+        # La contraseña es "admin123" hasheada
+        pwd_hash = make_hashes("admin123")
+        c.execute("INSERT INTO users (username, password) VALUES (?,?)", ("admin", pwd_hash))
+
     conn.commit()
     conn.close()
 
@@ -66,6 +85,59 @@ def get_dolar():
         info = f"(Compra:{int(r['compra'])} | Venta: ${int(r['venta'])})"
         return (float(r['compra']) + float(r['venta'])) / 2, info
     except: return 1480.0, "(Compra:1470 | Venta: $1490)"
+
+# --- GESTIÓN DE SESIÓN ---
+if 'logged_in' not in st.session_state:
+    st.session_state['logged_in'] = False
+if 'username' not in st.session_state:
+    st.session_state['username'] = ''
+
+# ==========================================
+# SISTEMA DE LOGIN
+# ==========================================
+def login_page():
+    st.markdown("<h1 style='text-align: center;'>🔐 SMART FINANCE ACCESS</h1>", unsafe_allow_html=True)
+    st.write("")
+    
+    col1, col2, col3 = st.columns([1, 2, 1])
+    with col2:
+        with st.form("login_form"):
+            username = st.text_input("Usuario")
+            password = st.text_input("Contraseña", type="password")
+            submit = st.form_submit_button("Ingresar", use_container_width=True)
+            
+            if submit:
+                hashed_pswd = make_hashes(password)
+                conn = sqlite3.connect(DB_NAME)
+                c = conn.cursor()
+                c.execute("SELECT * FROM users WHERE username = ? AND password = ?", (username, hashed_pswd))
+                data = c.fetchall()
+                conn.close()
+                
+                if data:
+                    st.session_state['logged_in'] = True
+                    st.session_state['username'] = username
+                    st.success("Acceso concedido")
+                    st.rerun()
+                else:
+                    st.error("Usuario o contraseña incorrectos")
+
+# SI NO ESTÁ LOGUEADO -> MOSTRAR LOGIN Y DETENER
+if not st.session_state['logged_in']:
+    login_page()
+    st.stop()  # Detiene la ejecución aquí para que no cargue el resto
+
+# ==========================================
+# APLICACIÓN PRINCIPAL (SOLO SI LOGUEADO)
+# ==========================================
+
+# Sidebar: Logout y Datos
+with st.sidebar:
+    st.write(f"👤 Usuario: **{st.session_state['username']}**")
+    if st.button("Cerrar Sesión"):
+        st.session_state['logged_in'] = False
+        st.rerun()
+    st.divider()
 
 dolar_val, dolar_info = get_dolar()
 
@@ -115,7 +187,7 @@ with tab_dash:
     df_mes = df_all[df_all['mes'] == mes_global].copy()
     
     if not df_mes.empty:
-        # --- CÁLCULO DE BALANCES ---
+        # --- MÉTRICAS ---
         ing_ars = df_mes[(df_mes['moneda']=="ARS")&(df_mes['tipo']=="GANANCIA")]['monto'].sum()
         gas_ars = df_mes[(df_mes['moneda']=="ARS")&(df_mes['tipo']=="GASTO")]['monto'].sum()
         res_ars = ing_ars - gas_ars
@@ -124,11 +196,8 @@ with tab_dash:
         gas_usd = df_mes[(df_mes['moneda']=="USD")&(df_mes['tipo']=="GASTO")]['monto'].sum()
         res_usd = ing_usd - gas_usd
         
-        # --- NUEVA MÉTRICA: RESULTADO COMBINADO ---
-        # Convertimos el saldo en dólares a pesos y sumamos
         patrimonio_total_ars = res_ars + (res_usd * dolar_val)
         
-        # --- VISUALIZACIÓN DE KPIs ---
         c1, c2, c3 = st.columns(3)
         c1.metric("RESULTADO MES (ARS)", formato_moneda_visual(res_ars, "ARS"))
         c2.metric("RESULTADO MES (USD)", formato_moneda_visual(res_usd, "USD"))
@@ -157,25 +226,14 @@ with tab_dash:
         st.divider()
 
         # --- TABLA JERÁRQUICA ---
-        
-        # 1. Aplicar Formato Visual
         df_view = df_mes.copy()
         df_view['monto_visual'] = df_view.apply(lambda x: formato_moneda_visual(x['monto'], x['moneda']), axis=1)
-        
-        # 2. Ordenar por GRUPO para vista jerárquica
         df_view = df_view.sort_values(by=["grupo", "tipo_gasto"])
         
-        # 3. COLUMNAS VISIBLES (Se eliminó 'moneda' de la vista de tabla)
-        # El usuario ya ve si es USD o ARS en el símbolo del monto ($ / US$)
         columnas_ordenadas = ["tipo_gasto", "monto_visual", "cuota", "tipo", "forma_pago", "fecha_pago"]
         
-        # 4. Configuración de Etiquetas (Ocultamos 'moneda' explícitamente)
         column_cfg = {
-            "id": None, 
-            "mes": None,        
-            "fecha": None,      
-            "monto": None,
-            "moneda": None,     # OCULTO EN TABLA, VISIBLE EN EDICIÓN
+            "id": None, "mes": None, "fecha": None, "monto": None, "moneda": None,
             "grupo": "GRUPO",
             "tipo_gasto": st.column_config.TextColumn("CONCEPTO"),
             "monto_visual": st.column_config.TextColumn("MONTO", width="medium"),
@@ -185,7 +243,6 @@ with tab_dash:
             "fecha_pago": st.column_config.DateColumn("FECHA DE PAGO", format="DD/MM/YYYY", width="medium"),
         }
         
-        # 5. Mostrar Tabla
         selection = st.dataframe(
             df_view.set_index("grupo")[columnas_ordenadas],
             column_config=column_cfg,
@@ -194,11 +251,10 @@ with tab_dash:
             selection_mode="single-row"
         )
 
-        # --- SECCIÓN DE EDICIÓN ---
+        # --- EDICIÓN ---
         if selection["selection"]["rows"]:
             st.divider()
             st.markdown("##### ✏️ EDITAR SELECCIÓN")
-            
             try:
                 idx_sel = selection["selection"]["rows"][0]
                 row_data = df_view.iloc[idx_sel]
@@ -208,13 +264,11 @@ with tab_dash:
                     c_e1, c_e2, c_e3 = st.columns([1, 2, 1])
                     new_grupo = c_e1.selectbox("Grupo", grupos_db, index=grupos_db.index(row_data['grupo']) if row_data['grupo'] in grupos_db else 0)
                     new_concepto = c_e2.text_input("Concepto", value=row_data['tipo_gasto'])
-                    
                     val_edit = formato_moneda_visual(row_data['monto'], row_data['moneda']).replace("US$ ", "").replace("$ ", "")
                     new_monto = c_e3.text_input("Monto", value=val_edit)
                     
                     c_e4, c_e5, c_e6 = st.columns(3)
                     new_cuota = c_e4.text_input("Cuota", value=row_data['cuota'])
-                    # Aquí SÍ mostramos moneda por si quiere cambiar un gasto de ARS a USD
                     new_moneda = c_e5.selectbox("Moneda", ["ARS", "USD"], index=["ARS", "USD"].index(row_data['moneda']))
                     new_pago = c_e6.selectbox("Forma de Pago", OPCIONES_PAGO, index=OPCIONES_PAGO.index(row_data['forma_pago']) if row_data['forma_pago'] in OPCIONES_PAGO else 0)
                     
@@ -224,33 +278,22 @@ with tab_dash:
                     new_fecha = c_e7.date_input("Fecha de Pago", value=f_val)
                     
                     col_b1, col_b2 = st.columns([1, 1])
-                    update_btn = col_b1.form_submit_button("💾 ACTUALIZAR")
-                    delete_btn = col_b2.form_submit_button("❌ ELIMINAR", type="primary")
-
-                    if update_btn:
+                    if col_b1.form_submit_button("💾 ACTUALIZAR"):
                         final_monto = procesar_monto_input(new_monto)
                         conn = sqlite3.connect(DB_NAME)
-                        conn.execute("""UPDATE movimientos SET 
-                                     grupo=?, tipo_gasto=?, monto=?, cuota=?, moneda=?, forma_pago=?, fecha_pago=?
-                                     WHERE id=?""", 
+                        conn.execute("""UPDATE movimientos SET grupo=?, tipo_gasto=?, monto=?, cuota=?, moneda=?, forma_pago=?, fecha_pago=? WHERE id=?""", 
                                      (new_grupo, new_concepto, final_monto, new_cuota, new_moneda, new_pago, str(new_fecha), id_mov))
-                        conn.commit(); conn.close()
-                        st.success("Actualizado"); st.rerun()
+                        conn.commit(); conn.close(); st.success("Actualizado"); st.rerun()
                     
-                    if delete_btn:
+                    if col_b2.form_submit_button("❌ ELIMINAR", type="primary"):
                         conn = sqlite3.connect(DB_NAME)
                         conn.execute("DELETE FROM movimientos WHERE id=?", (id_mov,))
-                        conn.commit(); conn.close()
-                        st.warning("Eliminado"); st.rerun()
-
-            except Exception as e:
-                st.error(f"Error selección: {e}")
-        
-    else: st.info("Sin movimientos. Carga uno nuevo o usa el clonador.")
+                        conn.commit(); conn.close(); st.warning("Eliminado"); st.rerun()
+            except Exception as e: st.error(f"Error selección: {e}")
+    else: st.info("Sin movimientos.")
 
 with tab_conf:
     st.subheader("⚙️ ADMINISTRACIÓN")
-    
     st.write("#### 🏷️ GRUPOS")
     c1, c2, c3 = st.columns(3)
     with c1:
@@ -292,6 +335,5 @@ with tab_conf:
                             (str(datetime.date.today()), t, r['tipo'], r['grupo'], r['tipo_gasto'], r['cuota'], r['monto'], r['moneda'], r['forma_pago'], r['fecha_pago']))
                 conn.commit(); st.success("Hecho"); st.rerun()
             conn.close()
-            
     st.divider()
     with open(DB_NAME, 'rb') as f: st.download_button("💾 RESPALDO", f, "backup.db")
