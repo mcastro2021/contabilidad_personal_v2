@@ -5,10 +5,25 @@ import requests
 import datetime
 import plotly.express as px
 import hashlib
+from streamlit_lottie import st_lottie
 
 # --- CONFIGURACIÓN ---
-st.set_page_config(page_title="SMART FINANCE PRO 2026", layout="wide")
+st.set_page_config(page_title="SMART FINANCE PRO", layout="wide")
 DB_NAME = "finanzas_2026.db"
+
+# --- FUNCIONES DE ANIMACIÓN (LOTTIE) ---
+def load_lottieurl(url):
+    try:
+        r = requests.get(url)
+        if r.status_code != 200:
+            return None
+        return r.json()
+    except:
+        return None
+
+# URLs de animaciones
+LOTTIE_FINANCE = "https://lottie.host/02a55953-2736-4763-b183-116515b81045/L1O1fW89yB.json" 
+LOTTIE_LOGIN = "https://lottie.host/93291880-990e-473d-82f5-b6574c831168/v2x2QkL6r4.json"
 
 # --- FUNCIONES DE SEGURIDAD ---
 def make_hashes(password):
@@ -70,10 +85,10 @@ MESES = ["Enero", "Febrero", "Marzo", "Abril", "Mayo", "Junio",
          "Julio", "Agosto", "Septiembre", "Octubre", "Noviembre", "Diciembre"]
 OPCIONES_PAGO = ["Bancario", "Efectivo", "Transferencia", "Tarjeta de Debito", "Tarjeta de Credito"]
 
-@st.cache_data(ttl=3600)
+@st.cache_data(ttl=60)
 def get_dolar():
     try:
-        r = requests.get("https://dolarapi.com/v1/dolares/blue", timeout=5).json()
+        r = requests.get("https://dolarapi.com/v1/dolares/blue", timeout=3).json()
         info = f"(Compra:{int(r['compra'])} | Venta: ${int(r['venta'])})"
         return (float(r['compra']) + float(r['venta'])) / 2, info
     except: return 1480.0, "(Compra:1470 | Venta: $1490)"
@@ -86,8 +101,13 @@ if 'username' not in st.session_state:
 
 def login_page():
     st.markdown("<h1 style='text-align: center;'>🔐 ACCESO FINANZAS</h1>", unsafe_allow_html=True)
+    
+    lottie_login = load_lottieurl(LOTTIE_LOGIN)
+    
     c1, c2, c3 = st.columns([1, 2, 1])
     with c2:
+        if lottie_login:
+            st_lottie(lottie_login, height=150, key="login_anim")
         with st.form("login"):
             u = st.text_input("Usuario")
             p = st.text_input("Contraseña", type="password")
@@ -111,7 +131,12 @@ if not st.session_state['logged_in']:
 # ==========================================
 
 with st.sidebar:
+    lottie_fin = load_lottieurl(LOTTIE_FINANCE)
+    if lottie_fin:
+        st_lottie(lottie_fin, height=100, key="sidebar_anim")
+        
     st.write(f"👤 **{st.session_state['username']}**")
+    st.caption("Versión: Pro v2.5")
     if st.button("Salir"):
         st.session_state['logged_in'] = False
         st.rerun()
@@ -119,10 +144,9 @@ with st.sidebar:
 
 dolar_val, dolar_info = get_dolar()
 
-st.title("SMART FINANCE PRO 2026")
+st.title("SMART FINANCE PRO")
 mes_global = st.selectbox("📅 MES DE TRABAJO:", MESES)
 
-# Carga de datos
 conn = get_db_connection()
 grupos_db = pd.read_sql("SELECT nombre FROM grupos ORDER BY nombre ASC", conn)['nombre'].tolist()
 df_all = pd.read_sql("SELECT * FROM movimientos", conn)
@@ -155,10 +179,11 @@ with st.sidebar.form("alta"):
                 (str(datetime.date.today()), mes_t, t_sel, g_sel, concepto, cuota, m_final, mon_sel, f_pago, fecha_v.strftime('%Y-%m-%d')))
         conn.commit()
         conn.close()
-        st.success("Guardado correctamente"); st.rerun()
+        st.balloons()
+        st.success("Guardado"); st.rerun()
 
-# --- PESTAÑAS ---
-tab1, tab2 = st.tabs(["📊 DETALLE POR SECCIONES", "⚙️ CONFIGURACIÓN"])
+# --- TABS ---
+tab1, tab2 = st.tabs(["📊 DASHBOARD JERÁRQUICO", "⚙️ CONFIGURACIÓN"])
 
 with tab1:
     st.info(f"Dolar Blue: {formato_moneda_visual(dolar_val, 'ARS')} {dolar_info}")
@@ -202,13 +227,12 @@ with tab1:
                 st.plotly_chart(px.bar(df_mes_graf[df_mes_graf['moneda']=="USD"].groupby('tipo')['monto'].sum().reset_index(), 
                                      x='tipo', y='monto', color='tipo', color_discrete_map={"GANANCIA":"#28a745","GASTO":"#dc3545"}), use_container_width=True)
 
-        st.divider()
+        st.markdown("---") 
         
-        # --- VISTA POR SECCIONES MAYORES (GANANCIAS vs GASTOS) ---
+        # --- TABLAS JERÁRQUICAS ---
         df_view = df_mes.copy()
         df_view['monto_visual'] = df_view.apply(lambda x: formato_moneda_visual(x['monto'], x['moneda']), axis=1)
         
-        # Columnas a mostrar (QUITAMOS 'tipo' y 'grupo' porque están en los títulos)
         cols_show = ["tipo_gasto", "monto_visual", "cuota", "forma_pago", "fecha_pago"]
         
         col_cfg = {
@@ -221,54 +245,43 @@ with tab1:
 
         row_to_edit = None 
 
-        # Iteramos primero por las Grandes Categorías
         for gran_tipo in ["GANANCIA", "GASTO"]:
-            # Filtramos solo items de este tipo
             df_tipo = df_view[df_view['tipo'] == gran_tipo]
             
             if not df_tipo.empty:
-                # TÍTULO PRINCIPAL CON COLOR
                 color = "🟢" if gran_tipo == "GANANCIA" else "🔴"
                 plural = "GANANCIAS" if gran_tipo == "GANANCIA" else "GASTOS"
                 st.markdown(f"## {color} {plural}")
                 
-                # Buscamos los grupos únicos dentro de este tipo
                 grupos_en_tipo = df_tipo['grupo'].unique()
                 grupos_en_tipo.sort()
                 
                 for grp in grupos_en_tipo:
-                    st.markdown(f"#### 📂 {grp}")
-                    
-                    # Filtramos por grupo
-                    df_grp = df_tipo[df_tipo['grupo'] == grp]
-                    
-                    # Mostramos tabla limpia
-                    selection = st.dataframe(
-                        df_grp[cols_show], 
-                        column_config=col_cfg,
-                        use_container_width=True,
-                        hide_index=True,
-                        on_select="rerun",
-                        selection_mode="single-row",
-                        key=f"tbl_{gran_tipo}_{grp}_{mes_global}"
-                    )
-                    
-                    if selection.selection.rows:
-                        idx_visual = selection.selection.rows[0]
-                        row_to_edit = df_grp.iloc[idx_visual]
-                
-                st.divider() # Separador entre Ganancias y Gastos
+                    with st.container():
+                        st.subheader(f"📂 {grp}")
+                        df_grp = df_tipo[df_tipo['grupo'] == grp]
+                        
+                        selection = st.dataframe(
+                            df_grp[cols_show], 
+                            column_config=col_cfg,
+                            use_container_width=True,
+                            hide_index=True,
+                            on_select="rerun",
+                            selection_mode="single-row",
+                            key=f"tbl_{gran_tipo}_{grp}_{mes_global}"
+                        )
+                        if selection.selection.rows:
+                            row_to_edit = df_grp.iloc[selection.selection.rows[0]]
+                st.divider()
 
-        # --- FORMULARIO DE EDICIÓN ---
+        # --- EDICIÓN ---
         if row_to_edit is not None:
-            st.markdown(f"### ✏️ EDITANDO REGISTRO SELECCIONADO")
-            st.info(f"Concepto: {row_to_edit['tipo_gasto']} | Grupo: {row_to_edit['grupo']}")
+            st.markdown(f"### ✏️ EDITANDO: {row_to_edit['tipo_gasto']}")
             
             with st.form("edit_form"):
                 id_mov = int(row_to_edit['id']) 
                 
                 c_e1, c_e2, c_e3 = st.columns(3)
-                # Permitimos cambiar TIPO por si hubo error de carga
                 new_tipo = c_e1.selectbox("Tipo", ["GASTO", "GANANCIA"], index=["GASTO", "GANANCIA"].index(row_to_edit['tipo']))
                 new_g = c_e2.selectbox("Grupo", grupos_db, index=grupos_db.index(row_to_edit['grupo']) if row_to_edit['grupo'] in grupos_db else 0)
                 new_c = c_e3.text_input("Concepto", value=row_to_edit['tipo_gasto'])
@@ -277,10 +290,7 @@ with tab1:
                 val_clean = formato_moneda_visual(row_to_edit['monto'], row_to_edit['moneda']).replace("US$ ", "").replace("$ ", "")
                 new_m = c_e4.text_input("Monto", value=val_clean)
                 new_mon = c_e5.selectbox("Moneda", ["ARS", "USD"], index=["ARS", "USD"].index(row_to_edit['moneda']))
-                
-                # --- AQUÍ ESTÁ LA CORRECCIÓN DE LA CUOTA ---
-                # Antes no se mostraba ni se guardaba
-                new_cuota = c_e6.text_input("Cuota", value=row_to_edit['cuota']) 
+                new_cuota = c_e6.text_input("Cuota", value=str(row_to_edit['cuota'])) 
                 
                 c_e7, c_e8 = st.columns(2)
                 new_pago = c_e7.selectbox("Forma Pago", OPCIONES_PAGO, index=OPCIONES_PAGO.index(row_to_edit['forma_pago']) if row_to_edit['forma_pago'] in OPCIONES_PAGO else 0)
@@ -292,14 +302,13 @@ with tab1:
                 if b1.form_submit_button("💾 GUARDAR CAMBIOS"):
                     m_f = procesar_monto_input(new_m)
                     conn = get_db_connection()
-                    # ACTUALIZACIÓN SQL CORREGIDA: Incluye 'cuota'
                     conn.execute("""UPDATE movimientos SET 
                                  tipo=?, grupo=?, tipo_gasto=?, monto=?, moneda=?, cuota=?, forma_pago=?, fecha_pago=? 
                                  WHERE id=?""",
                                  (new_tipo, new_g, new_c, m_f, new_mon, new_cuota, new_pago, str(new_f), id_mov))
                     conn.commit()
                     conn.close()
-                    st.success("Registro actualizado exitosamente."); st.rerun()
+                    st.success("Editado correctamente"); st.rerun()
                     
                 if b2.form_submit_button("❌ ELIMINAR", type="primary"):
                     conn = get_db_connection()
@@ -308,7 +317,7 @@ with tab1:
                     conn.close()
                     st.warning("Eliminado"); st.rerun()
     else:
-        st.info("No hay movimientos cargados en este mes.")
+        st.info("Sin datos en este mes.")
 
 with tab2:
     st.header("⚙️ Configuración")
@@ -335,9 +344,12 @@ with tab2:
             conn = get_db_connection()
             try:
                 conn.execute("INSERT INTO users VALUES (?,?)", (u_new, make_hashes(p_new)))
-                conn.commit(); st.success("Creado")
-            except: st.error("Ya existe")
-            finally: conn.close()
+                conn.commit()
+                st.success("Creado")
+            except Exception as e:
+                st.error(f"Error: {e}")
+            finally:
+                conn.close()
             
     with st.expander("🔑 CAMBIAR MI CONTRASEÑA"):
         curr = st.text_input("Actual", type="password")
@@ -352,7 +364,7 @@ with tab2:
             if c.fetchone():
                 if n1 == n2:
                     c.execute("UPDATE users SET password=? WHERE username=?", (make_hashes(n1), user))
-                    conn.commit(); st.success("Cambiada! Reingresa."); st.session_state['logged_in']=False; st.rerun()
+                    conn.commit(); st.success("Cambiada!"); st.session_state['logged_in']=False; st.rerun()
                 else: st.error("No coinciden")
             else: st.error("Contraseña actual incorrecta")
             conn.close()
