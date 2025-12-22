@@ -37,12 +37,17 @@ def procesar_monto_input(texto):
         return float(t.replace(".", "").replace(",", "."))
     except: return 0.0
 
-# --- BASE DE DATOS ---
+# --- CONEXIÓN A BASE DE DATOS (ESTABILIZADA) ---
+def get_db_connection():
+    # check_same_thread=False permite que Streamlit maneje la conexión en múltiples hilos sin bloquearse
+    conn = sqlite3.connect(DB_NAME, check_same_thread=False)
+    return conn
+
 def init_db():
-    conn = sqlite3.connect(DB_NAME)
+    conn = get_db_connection()
     c = conn.cursor()
     
-    # Tablas
+    # Crear Tablas
     c.execute('''CREATE TABLE IF NOT EXISTS movimientos 
                  (id INTEGER PRIMARY KEY AUTOINCREMENT, fecha TEXT, mes TEXT, 
                   tipo TEXT, grupo TEXT, tipo_gasto TEXT, cuota TEXT, monto REAL, moneda TEXT,
@@ -56,15 +61,18 @@ def init_db():
         grupos_base = [("AHORRO MANUEL",), ("CASA",), ("AUTO",), ("VARIOS",)]
         c.executemany("INSERT OR IGNORE INTO grupos VALUES (?)", grupos_base)
         
-    # Datos Semilla Usuario Admin (admin / admin123)
+    # Datos Semilla Usuario Admin (SOLO SI LA TABLA ESTÁ VACÍA)
     c.execute("SELECT count(*) FROM users")
     if c.fetchone()[0] == 0:
+        # Contraseña por defecto: admin123
         pwd_hash = make_hashes("admin123")
         c.execute("INSERT INTO users (username, password) VALUES (?,?)", ("admin", pwd_hash))
+        print("--- Usuario ADMIN creado por defecto ---")
 
     conn.commit()
     conn.close()
 
+# Inicializar DB al arrancar
 init_db()
 
 # --- CONSTANTES ---
@@ -92,6 +100,7 @@ if 'username' not in st.session_state:
 def login_page():
     st.markdown("<h1 style='text-align: center;'>🔐 SMART FINANCE ACCESS</h1>", unsafe_allow_html=True)
     st.write("")
+    
     col1, col2, col3 = st.columns([1, 2, 1])
     with col2:
         with st.form("login_form"):
@@ -101,7 +110,7 @@ def login_page():
             
             if submit:
                 hashed_pswd = make_hashes(password)
-                conn = sqlite3.connect(DB_NAME)
+                conn = get_db_connection()
                 c = conn.cursor()
                 c.execute("SELECT * FROM users WHERE username = ? AND password = ?", (username, hashed_pswd))
                 data = c.fetchall()
@@ -120,7 +129,7 @@ if not st.session_state['logged_in']:
     st.stop()
 
 # ==========================================
-# APP PRINCIPAL
+# APLICACIÓN PRINCIPAL
 # ==========================================
 
 # Sidebar
@@ -138,12 +147,12 @@ st.title("SMART FINANCE PRO 2026")
 mes_global = st.selectbox("📅 MES DE TRABAJO:", MESES)
 
 # Data
-conn = sqlite3.connect(DB_NAME)
+conn = get_db_connection()
 grupos_db = pd.read_sql("SELECT nombre FROM grupos ORDER BY nombre ASC", conn)['nombre'].tolist()
 df_all = pd.read_sql("SELECT * FROM movimientos", conn)
 conn.close()
 
-# Formulario Carga
+# Sidebar Carga
 st.sidebar.header("📥 CARGAR NUEVO")
 with st.sidebar.form("form_carga", clear_on_submit=True):
     t_sel = st.selectbox("TIPO", ["GASTO", "GANANCIA"])
@@ -159,7 +168,7 @@ with st.sidebar.form("form_carga", clear_on_submit=True):
     
     if st.form_submit_button("GRABAR"):
         m_final = procesar_monto_input(m_input)
-        conn = sqlite3.connect(DB_NAME)
+        conn = get_db_connection()
         idx_base = MESES.index(mes_global)
         for i in range(int(c_act), int(c_tot) + 1):
             offset = i - int(c_act)
@@ -243,7 +252,6 @@ with tab_dash:
             selection_mode="single-row"
         )
 
-        # Edicion
         if selection["selection"]["rows"]:
             st.divider()
             st.markdown("##### ✏️ EDITAR SELECCIÓN")
@@ -272,13 +280,13 @@ with tab_dash:
                     col_b1, col_b2 = st.columns([1, 1])
                     if col_b1.form_submit_button("💾 ACTUALIZAR"):
                         final_monto = procesar_monto_input(new_monto)
-                        conn = sqlite3.connect(DB_NAME)
+                        conn = get_db_connection()
                         conn.execute("""UPDATE movimientos SET grupo=?, tipo_gasto=?, monto=?, cuota=?, moneda=?, forma_pago=?, fecha_pago=? WHERE id=?""", 
                                      (new_grupo, new_concepto, final_monto, new_cuota, new_moneda, new_pago, str(new_fecha), id_mov))
                         conn.commit(); conn.close(); st.success("Actualizado"); st.rerun()
                     
                     if col_b2.form_submit_button("❌ ELIMINAR", type="primary"):
-                        conn = sqlite3.connect(DB_NAME)
+                        conn = get_db_connection()
                         conn.execute("DELETE FROM movimientos WHERE id=?", (id_mov,))
                         conn.commit(); conn.close(); st.warning("Eliminado"); st.rerun()
             except Exception as e: st.error(f"Error selección: {e}")
@@ -287,19 +295,18 @@ with tab_dash:
 with tab_conf:
     st.subheader("⚙️ ADMINISTRACIÓN")
     
-    # GESTION GRUPOS
     st.write("#### 🏷️ GRUPOS")
     c1, c2, c3 = st.columns(3)
     with c1:
         ng = st.text_input("Crear Grupo").upper()
         if st.button("➕ Crear"):
-            conn = sqlite3.connect(DB_NAME); conn.execute("INSERT OR IGNORE INTO grupos VALUES (?)", (ng,)); conn.commit(); conn.close(); st.rerun()
+            conn = get_db_connection(); conn.execute("INSERT OR IGNORE INTO grupos VALUES (?)", (ng,)); conn.commit(); conn.close(); st.rerun()
     with c2:
         if grupos_db:
             g_ren = st.selectbox("Renombrar", grupos_db)
             g_new = st.text_input("Nuevo Nombre").upper()
             if st.button("✏️ Cambiar"):
-                conn = sqlite3.connect(DB_NAME)
+                conn = get_db_connection()
                 conn.execute("UPDATE grupos SET nombre=? WHERE nombre=?",(g_new, g_ren))
                 conn.execute("UPDATE movimientos SET grupo=? WHERE grupo=?",(g_new, g_ren))
                 conn.commit(); conn.close(); st.rerun()
@@ -307,54 +314,55 @@ with tab_conf:
         if grupos_db:
             g_del = st.selectbox("Eliminar", grupos_db)
             if st.button("🗑️ Borrar"):
-                conn = sqlite3.connect(DB_NAME); conn.execute("DELETE FROM grupos WHERE nombre=?", (g_del,)); conn.commit(); conn.close(); st.rerun()
+                conn = get_db_connection(); conn.execute("DELETE FROM grupos WHERE nombre=?", (g_del,)); conn.commit(); conn.close(); st.rerun()
 
     st.divider()
     
-    # SEGURIDAD Y USUARIOS
-    st.write("#### 🔐 SEGURIDAD Y USUARIOS")
-    
-    # CAMBIAR CONTRASEÑA
+    st.write("#### 🔐 SEGURIDAD")
+    # CAMBIAR CONTRASEÑA CORREGIDO
     with st.expander("🔑 Cambiar mi contraseña"):
         with st.form("change_pass"):
             current_pass = st.text_input("Contraseña Actual", type="password")
             new_pass = st.text_input("Nueva Contraseña", type="password")
             confirm_pass = st.text_input("Repetir Nueva Contraseña", type="password")
             if st.form_submit_button("Actualizar Contraseña"):
-                conn = sqlite3.connect(DB_NAME)
+                conn = get_db_connection()
                 c = conn.cursor()
-                # Verificar contraseña actual
                 current_user = st.session_state['username']
                 hashed_current = make_hashes(current_pass)
+                
+                # Verificar credenciales
                 c.execute("SELECT * FROM users WHERE username = ? AND password = ?", (current_user, hashed_current))
                 if c.fetchone():
                     if new_pass == confirm_pass:
                         new_hashed = make_hashes(new_pass)
+                        # Actualizar
                         c.execute("UPDATE users SET password = ? WHERE username = ?", (new_hashed, current_user))
                         conn.commit()
-                        st.success("Contraseña actualizada exitosamente.")
+                        conn.close()
+                        st.success("✅ Contraseña actualizada exitosamente.")
+                        st.info("Por favor, actualice la página o cierre sesión para probar la nueva clave.")
                     else:
                         st.error("Las nuevas contraseñas no coinciden.")
+                        conn.close()
                 else:
                     st.error("La contraseña actual es incorrecta.")
-                conn.close()
+                    conn.close()
 
-    # CREAR NUEVO USUARIO
     with st.expander("➕ Crear nuevo usuario"):
         with st.form("new_user"):
             new_username = st.text_input("Nuevo Usuario")
             new_user_pass = st.text_input("Contraseña", type="password")
             if st.form_submit_button("Crear Usuario"):
                 if new_username and new_user_pass:
-                    conn = sqlite3.connect(DB_NAME)
-                    c = conn.cursor()
+                    conn = get_db_connection()
                     try:
-                        c.execute("INSERT INTO users (username, password) VALUES (?,?)", (new_username, make_hashes(new_user_pass)))
+                        conn.execute("INSERT INTO users (username, password) VALUES (?,?)", (new_username, make_hashes(new_user_pass)))
                         conn.commit()
                         st.success(f"Usuario {new_username} creado.")
                     except sqlite3.IntegrityError:
                         st.error("El usuario ya existe.")
-                    conn.close()
+                    finally: conn.close()
                 else:
                     st.error("Complete todos los campos.")
 
@@ -366,7 +374,7 @@ with tab_conf:
     with cc3:
         st.write("")
         if st.button("🚀 EJECUTAR"):
-            conn = sqlite3.connect(DB_NAME)
+            conn = get_db_connection()
             src = pd.read_sql(f"SELECT * FROM movimientos WHERE mes = '{m_src}'", conn)
             if not src.empty:
                 targets = MESES if m_dst == "TODO EL AÑO" else [m_dst]
