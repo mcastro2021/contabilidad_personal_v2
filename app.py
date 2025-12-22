@@ -37,8 +37,9 @@ def procesar_monto_input(texto):
         return float(t.replace(".", "").replace(",", "."))
     except: return 0.0
 
-# --- CONEXIÓN BD ---
+# --- CONEXIÓN A BASE DE DATOS ROBUSTA ---
 def get_db_connection():
+    # check_same_thread=False es vital para evitar bloqueos en Streamlit
     conn = sqlite3.connect(DB_NAME, check_same_thread=False)
     return conn
 
@@ -52,6 +53,7 @@ def init_db():
     c.execute('''CREATE TABLE IF NOT EXISTS grupos (nombre TEXT PRIMARY KEY)''')
     c.execute('''CREATE TABLE IF NOT EXISTS users (username TEXT PRIMARY KEY, password TEXT)''')
 
+    # Datos iniciales solo si está vacía
     c.execute("SELECT count(*) FROM grupos")
     if c.fetchone()[0] == 0:
         c.executemany("INSERT OR IGNORE INTO grupos VALUES (?)", [("AHORRO MANUEL",), ("CASA",), ("AUTO",), ("VARIOS",)])
@@ -63,6 +65,7 @@ def init_db():
     conn.commit()
     conn.close()
 
+# Inicializamos DB al arrancar
 init_db()
 
 # --- CONSTANTES ---
@@ -122,6 +125,7 @@ dolar_val, dolar_info = get_dolar()
 st.title("SMART FINANCE PRO 2026")
 mes_global = st.selectbox("📅 MES DE TRABAJO:", MESES)
 
+# Carga de datos FRESCA (Sin caché para ver cambios al instante)
 conn = get_db_connection()
 grupos_db = pd.read_sql("SELECT nombre FROM grupos ORDER BY nombre ASC", conn)['nombre'].tolist()
 df_all = pd.read_sql("SELECT * FROM movimientos", conn)
@@ -152,7 +156,9 @@ with st.sidebar.form("alta"):
             fecha_v = f_fecha + pd.DateOffset(months=offset)
             conn.execute("INSERT INTO movimientos (fecha, mes, tipo, grupo, tipo_gasto, cuota, monto, moneda, forma_pago, fecha_pago) VALUES (?,?,?,?,?,?,?,?,?,?)",
                 (str(datetime.date.today()), mes_t, t_sel, g_sel, concepto, cuota, m_final, mon_sel, f_pago, fecha_v.strftime('%Y-%m-%d')))
-        conn.commit(); conn.close(); st.success("Guardado"); st.rerun()
+        conn.commit() # COMMIT EXPLICITO
+        conn.close()
+        st.success("Guardado correctamente"); st.rerun()
 
 # --- PESTAÑAS ---
 tab1, tab2 = st.tabs(["📊 DETALLE POR GRUPOS", "⚙️ CONFIGURACIÓN"])
@@ -178,33 +184,26 @@ with tab1:
         c3.metric("PATRIMONIO TOTAL ($)", formato_moneda_visual(patrimonio, "ARS"))
         
         st.divider()
-
-        # --- SECCIÓN GRÁFICA (RESTAURADA) ---
+        
+        # --- GRÁFICOS ---
         df_mes_graf = df_mes.copy()
-        # Calculamos valor unificado en ARS para el gráfico de torta
         df_mes_graf['m_ars_v'] = df_mes_graf.apply(lambda x: x['monto'] * dolar_val if x['moneda'] == 'USD' else x['monto'], axis=1)
         
         col_pie, col_ars, col_usd = st.columns(3)
         with col_pie:
-            st.caption("Distribución de Gastos (ARS Equiv.)")
+            st.caption("Distribución de Gastos")
             if not df_mes_graf[df_mes_graf['tipo']=="GASTO"].empty:
-                fig_pie = px.pie(df_mes_graf[df_mes_graf['tipo']=="GASTO"], values='m_ars_v', names='grupo', hole=0.4)
-                st.plotly_chart(fig_pie, use_container_width=True)
-            else: st.info("Sin gastos para graficar.")
-            
+                st.plotly_chart(px.pie(df_mes_graf[df_mes_graf['tipo']=="GASTO"], values='m_ars_v', names='grupo', hole=0.4), use_container_width=True)
         with col_ars:
-            st.caption("Flujo de Caja (Pesos)")
+            st.caption("Flujo Pesos")
             if not df_mes_graf[df_mes_graf['moneda']=="ARS"].empty:
-                fig_bar_ars = px.bar(df_mes_graf[df_mes_graf['moneda']=="ARS"].groupby('tipo')['monto'].sum().reset_index(), 
-                                     x='tipo', y='monto', color='tipo', color_discrete_map={"GANANCIA":"#28a745","GASTO":"#dc3545"})
-                st.plotly_chart(fig_bar_ars, use_container_width=True)
-                
+                st.plotly_chart(px.bar(df_mes_graf[df_mes_graf['moneda']=="ARS"].groupby('tipo')['monto'].sum().reset_index(), 
+                                     x='tipo', y='monto', color='tipo', color_discrete_map={"GANANCIA":"#28a745","GASTO":"#dc3545"}), use_container_width=True)
         with col_usd:
-            st.caption("Flujo de Caja (Dólares)")
+            st.caption("Flujo Dólares")
             if not df_mes_graf[df_mes_graf['moneda']=="USD"].empty:
-                fig_bar_usd = px.bar(df_mes_graf[df_mes_graf['moneda']=="USD"].groupby('tipo')['monto'].sum().reset_index(), 
-                                     x='tipo', y='monto', color='tipo', color_discrete_map={"GANANCIA":"#28a745","GASTO":"#dc3545"})
-                st.plotly_chart(fig_bar_usd, use_container_width=True)
+                st.plotly_chart(px.bar(df_mes_graf[df_mes_graf['moneda']=="USD"].groupby('tipo')['monto'].sum().reset_index(), 
+                                     x='tipo', y='monto', color='tipo', color_discrete_map={"GANANCIA":"#28a745","GASTO":"#dc3545"}), use_container_width=True)
 
         st.divider()
         
@@ -258,7 +257,7 @@ with tab1:
                 st.markdown(f"#### ✏️ EDITANDO: {row_to_edit['tipo_gasto']} (Grupo: {row_to_edit['grupo']})")
                 
                 with st.form("edit_form"):
-                    id_mov = int(row_data_id := row_to_edit['id']) 
+                    id_mov = int(row_to_edit['id']) # ID persistente
                     
                     ce1, ce2 = st.columns(2)
                     new_g = ce1.selectbox("Grupo", grupos_db, index=grupos_db.index(row_to_edit['grupo']) if row_to_edit['grupo'] in grupos_db else 0)
@@ -279,12 +278,16 @@ with tab1:
                         conn = get_db_connection()
                         conn.execute("UPDATE movimientos SET grupo=?, tipo_gasto=?, monto=?, moneda=?, fecha_pago=? WHERE id=?",
                                      (new_g, new_c, m_f, new_mon, str(new_f), id_mov))
-                        conn.commit(); conn.close(); st.success("Actualizado"); st.rerun()
+                        conn.commit() # Commit inmediato
+                        conn.close()
+                        st.success("Actualizado"); st.rerun()
                         
                     if b2.form_submit_button("❌ ELIMINAR", type="primary"):
                         conn = get_db_connection()
                         conn.execute("DELETE FROM movimientos WHERE id=?", (id_mov,))
-                        conn.commit(); conn.close(); st.warning("Eliminado"); st.rerun()
+                        conn.commit() # Commit inmediato
+                        conn.close()
+                        st.warning("Eliminado"); st.rerun()
         else:
             st.info("No hay movimientos cargados en este mes.")
 
