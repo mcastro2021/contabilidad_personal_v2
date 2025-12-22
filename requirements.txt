@@ -3,3 +3,4 @@ pandas
 requests
 plotly
 streamlit-lottie
+psycopg2-binary

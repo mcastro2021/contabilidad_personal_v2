@@ -1,6 +1,7 @@
 import streamlit as st
 import pandas as pd
-import sqlite3
+import psycopg2
+import os
 import requests
 import datetime
 import plotly.express as px
@@ -9,32 +10,26 @@ from streamlit_lottie import st_lottie
 
 # --- CONFIGURACIÓN ---
 st.set_page_config(page_title="SMART FINANCE PRO", layout="wide")
-DB_NAME = "finanzas_2026.db"
 
-# --- FUNCIONES DE ANIMACIÓN (LOTTIE) ---
+# --- FUNCIONES DE ANIMACIÓN ---
 def load_lottieurl(url):
     try:
         r = requests.get(url)
-        if r.status_code != 200:
-            return None
+        if r.status_code != 200: return None
         return r.json()
-    except:
-        return None
+    except: return None
 
-# URLs de animaciones
 LOTTIE_FINANCE = "https://lottie.host/02a55953-2736-4763-b183-116515b81045/L1O1fW89yB.json" 
 LOTTIE_LOGIN = "https://lottie.host/93291880-990e-473d-82f5-b6574c831168/v2x2QkL6r4.json"
 
-# --- FUNCIONES DE SEGURIDAD ---
+# --- SEGURIDAD ---
 def make_hashes(password):
     return hashlib.sha256(str.encode(password)).hexdigest()
 
 def check_hashes(password, hashed_text):
-    if make_hashes(password) == hashed_text:
-        return True
-    return False
+    return make_hashes(password) == hashed_text
 
-# --- FUNCIONES DE FORMATO ---
+# --- FORMATO ---
 def formato_moneda_visual(valor, moneda):
     if valor is None or pd.isna(valor): return ""
     try:
@@ -52,32 +47,47 @@ def procesar_monto_input(texto):
         return float(t.replace(".", "").replace(",", "."))
     except: return 0.0
 
-# --- CONEXIÓN BD ---
+# --- CONEXIÓN BASE DE DATOS (POSTGRESQL) ---
 def get_db_connection():
-    conn = sqlite3.connect(DB_NAME, check_same_thread=False)
+    # Intenta obtener la URL de Render, si no existe, usa una local (para pruebas) o lanza error
+    DATABASE_URL = os.environ.get('DATABASE_URL')
+    if not DATABASE_URL:
+        st.error("⚠️ No se encontró la variable DATABASE_URL. Configúrala en Render.")
+        st.stop()
+    
+    conn = psycopg2.connect(DATABASE_URL)
     return conn
 
 def init_db():
     conn = get_db_connection()
     c = conn.cursor()
+    
+    # Crear tablas con sintaxis PostgreSQL
+    # SERIAL reemplaza a AUTOINCREMENT
     c.execute('''CREATE TABLE IF NOT EXISTS movimientos 
-                 (id INTEGER PRIMARY KEY AUTOINCREMENT, fecha TEXT, mes TEXT, 
+                 (id SERIAL PRIMARY KEY, fecha TEXT, mes TEXT, 
                   tipo TEXT, grupo TEXT, tipo_gasto TEXT, cuota TEXT, monto REAL, moneda TEXT,
                   forma_pago TEXT, fecha_pago TEXT)''')
+    
     c.execute('''CREATE TABLE IF NOT EXISTS grupos (nombre TEXT PRIMARY KEY)''')
     c.execute('''CREATE TABLE IF NOT EXISTS users (username TEXT PRIMARY KEY, password TEXT)''')
 
+    # Datos iniciales
     c.execute("SELECT count(*) FROM grupos")
     if c.fetchone()[0] == 0:
-        c.executemany("INSERT OR IGNORE INTO grupos VALUES (?)", [("AHORRO MANUEL",), ("CASA",), ("AUTO",), ("VARIOS",)])
+        # Postgres usa %s en lugar de ?
+        grupos_base = [("AHORRO MANUEL",), ("CASA",), ("AUTO",), ("VARIOS",)]
+        # ON CONFLICT DO NOTHING reemplaza a INSERT OR IGNORE
+        c.executemany("INSERT INTO grupos VALUES (%s) ON CONFLICT DO NOTHING", grupos_base)
         
     c.execute("SELECT count(*) FROM users")
     if c.fetchone()[0] == 0:
-        c.execute("INSERT INTO users (username, password) VALUES (?,?)", ("admin", make_hashes("admin123")))
+        c.execute("INSERT INTO users (username, password) VALUES (%s, %s) ON CONFLICT DO NOTHING", ("admin", make_hashes("admin123")))
 
     conn.commit()
     conn.close()
 
+# Inicializar DB
 init_db()
 
 # --- CONSTANTES ---
@@ -89,9 +99,8 @@ OPCIONES_PAGO = ["Bancario", "Efectivo", "Transferencia", "Tarjeta de Debito", "
 def get_dolar():
     try:
         r = requests.get("https://dolarapi.com/v1/dolares/blue", timeout=3).json()
-        info = f"(Compra:{int(r['compra'])} | Venta: ${int(r['venta'])})"
-        return (float(r['compra']) + float(r['venta'])) / 2, info
-    except: return 1480.0, "(Compra:1470 | Venta: $1490)"
+        return (float(r['compra']) + float(r['venta'])) / 2, f"(Compra:{int(r['compra'])} | Venta: ${int(r['venta'])})"
+    except: return 1480.0, "(Ref)"
 
 # --- LOGIN SYSTEM ---
 if 'logged_in' not in st.session_state:
@@ -101,20 +110,17 @@ if 'username' not in st.session_state:
 
 def login_page():
     st.markdown("<h1 style='text-align: center;'>🔐 ACCESO FINANZAS</h1>", unsafe_allow_html=True)
-    
     lottie_login = load_lottieurl(LOTTIE_LOGIN)
-    
     c1, c2, c3 = st.columns([1, 2, 1])
     with c2:
-        if lottie_login:
-            st_lottie(lottie_login, height=150, key="login_anim")
+        if lottie_login: st_lottie(lottie_login, height=150, key="login_anim")
         with st.form("login"):
             u = st.text_input("Usuario")
             p = st.text_input("Contraseña", type="password")
             if st.form_submit_button("Entrar", use_container_width=True):
                 conn = get_db_connection()
                 c = conn.cursor()
-                c.execute("SELECT * FROM users WHERE username=? AND password=?", (u, make_hashes(p)))
+                c.execute("SELECT * FROM users WHERE username=%s AND password=%s", (u, make_hashes(p)))
                 if c.fetchall():
                     st.session_state['logged_in'] = True
                     st.session_state['username'] = u
@@ -132,11 +138,9 @@ if not st.session_state['logged_in']:
 
 with st.sidebar:
     lottie_fin = load_lottieurl(LOTTIE_FINANCE)
-    if lottie_fin:
-        st_lottie(lottie_fin, height=100, key="sidebar_anim")
-        
+    if lottie_fin: st_lottie(lottie_fin, height=100, key="sidebar_anim")
     st.write(f"👤 **{st.session_state['username']}**")
-    st.caption("Versión: Pro v2.5")
+    st.caption("Base de Datos: PostgreSQL")
     if st.button("Salir"):
         st.session_state['logged_in'] = False
         st.rerun()
@@ -147,6 +151,7 @@ dolar_val, dolar_info = get_dolar()
 st.title("SMART FINANCE PRO")
 mes_global = st.selectbox("📅 MES DE TRABAJO:", MESES)
 
+# Carga de datos (pandas usa read_sql y necesita la conn)
 conn = get_db_connection()
 grupos_db = pd.read_sql("SELECT nombre FROM grupos ORDER BY nombre ASC", conn)['nombre'].tolist()
 df_all = pd.read_sql("SELECT * FROM movimientos", conn)
@@ -169,13 +174,15 @@ with st.sidebar.form("alta"):
     if st.form_submit_button("GRABAR"):
         m_final = procesar_monto_input(m_input)
         conn = get_db_connection()
+        c = conn.cursor()
         idx_base = MESES.index(mes_global)
         for i in range(int(c_act), int(c_tot)+1):
             offset = i - int(c_act)
             mes_t = MESES[(idx_base + offset)%12]
             cuota = f"{i}/{int(c_tot)}"
             fecha_v = f_fecha + pd.DateOffset(months=offset)
-            conn.execute("INSERT INTO movimientos (fecha, mes, tipo, grupo, tipo_gasto, cuota, monto, moneda, forma_pago, fecha_pago) VALUES (?,?,?,?,?,?,?,?,?,?)",
+            # Sintaxis %s para Postgres
+            c.execute("INSERT INTO movimientos (fecha, mes, tipo, grupo, tipo_gasto, cuota, monto, moneda, forma_pago, fecha_pago) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
                 (str(datetime.date.today()), mes_t, t_sel, g_sel, concepto, cuota, m_final, mon_sel, f_pago, fecha_v.strftime('%Y-%m-%d')))
         conn.commit()
         conn.close()
@@ -302,9 +309,11 @@ with tab1:
                 if b1.form_submit_button("💾 GUARDAR CAMBIOS"):
                     m_f = procesar_monto_input(new_m)
                     conn = get_db_connection()
-                    conn.execute("""UPDATE movimientos SET 
-                                 tipo=?, grupo=?, tipo_gasto=?, monto=?, moneda=?, cuota=?, forma_pago=?, fecha_pago=? 
-                                 WHERE id=?""",
+                    c = conn.cursor()
+                    # Sintaxis %s
+                    c.execute("""UPDATE movimientos SET 
+                                 tipo=%s, grupo=%s, tipo_gasto=%s, monto=%s, moneda=%s, cuota=%s, forma_pago=%s, fecha_pago=%s 
+                                 WHERE id=%s""",
                                  (new_tipo, new_g, new_c, m_f, new_mon, new_cuota, new_pago, str(new_f), id_mov))
                     conn.commit()
                     conn.close()
@@ -312,7 +321,8 @@ with tab1:
                     
                 if b2.form_submit_button("❌ ELIMINAR", type="primary"):
                     conn = get_db_connection()
-                    conn.execute("DELETE FROM movimientos WHERE id=?", (id_mov,))
+                    c = conn.cursor()
+                    c.execute("DELETE FROM movimientos WHERE id=%s", (id_mov,))
                     conn.commit()
                     conn.close()
                     st.warning("Eliminado"); st.rerun()
@@ -328,13 +338,15 @@ with tab2:
             n_g = st.text_input("Nuevo Grupo").upper()
             if st.button("Crear Grupo"):
                 conn = get_db_connection()
-                conn.execute("INSERT OR IGNORE INTO grupos VALUES (?)", (n_g,))
+                c = conn.cursor()
+                c.execute("INSERT INTO grupos VALUES (%s) ON CONFLICT DO NOTHING", (n_g,))
                 conn.commit(); conn.close(); st.rerun()
         with c2:
             d_g = st.selectbox("Eliminar Grupo", grupos_db)
             if st.button("Eliminar"):
                 conn = get_db_connection()
-                conn.execute("DELETE FROM grupos WHERE nombre=?", (d_g,))
+                c = conn.cursor()
+                c.execute("DELETE FROM grupos WHERE nombre=%s", (d_g,))
                 conn.commit(); conn.close(); st.rerun()
 
     with st.expander("🔐 USUARIOS"):
@@ -342,8 +354,9 @@ with tab2:
         p_new = st.text_input("Nueva Contraseña", type="password")
         if st.button("Crear Usuario"):
             conn = get_db_connection()
+            c = conn.cursor()
             try:
-                conn.execute("INSERT INTO users VALUES (?,?)", (u_new, make_hashes(p_new)))
+                c.execute("INSERT INTO users VALUES (%s, %s)", (u_new, make_hashes(p_new)))
                 conn.commit()
                 st.success("Creado")
             except Exception as e:
@@ -360,10 +373,10 @@ with tab2:
             c = conn.cursor()
             curr_hash = make_hashes(curr)
             user = st.session_state['username']
-            c.execute("SELECT * FROM users WHERE username=? AND password=?", (user, curr_hash))
+            c.execute("SELECT * FROM users WHERE username=%s AND password=%s", (user, curr_hash))
             if c.fetchone():
                 if n1 == n2:
-                    c.execute("UPDATE users SET password=? WHERE username=?", (make_hashes(n1), user))
+                    c.execute("UPDATE users SET password=%s WHERE username=%s", (make_hashes(n1), user))
                     conn.commit(); st.success("Cambiada!"); st.session_state['logged_in']=False; st.rerun()
                 else: st.error("No coinciden")
             else: st.error("Contraseña actual incorrecta")
@@ -377,17 +390,18 @@ with tab2:
     m_dst = c2.selectbox("Hasta", ["TODO EL AÑO"]+MESES)
     if c3.button("🚀 CLONAR"):
         conn = get_db_connection()
+        c = conn.cursor()
         src = pd.read_sql(f"SELECT * FROM movimientos WHERE mes='{m_src}'", conn)
         if not src.empty:
             targets = MESES if m_dst == "TODO EL AÑO" else [m_dst]
             for t in targets:
                 if t == m_src: continue
-                conn.execute(f"DELETE FROM movimientos WHERE mes='{t}'")
+                c.execute("DELETE FROM movimientos WHERE mes=%s", (t,))
                 for _, r in src.iterrows():
-                    conn.execute("INSERT INTO movimientos (fecha, mes, tipo, grupo, tipo_gasto, cuota, monto, moneda, forma_pago, fecha_pago) VALUES (?,?,?,?,?,?,?,?,?,?)",
+                    c.execute("INSERT INTO movimientos (fecha, mes, tipo, grupo, tipo_gasto, cuota, monto, moneda, forma_pago, fecha_pago) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
                         (str(datetime.date.today()), t, r['tipo'], r['grupo'], r['tipo_gasto'], r['cuota'], r['monto'], r['moneda'], r['forma_pago'], r['fecha_pago']))
             conn.commit(); st.success("Clonado!"); st.rerun()
         conn.close()
-        
-    st.divider()
-    with open(DB_NAME, 'rb') as f: st.download_button("💾 BACKUP DB", f, "backup.db")
+    
+    # YA NO NECESITAS RESPALDO .DB PORQUE USAS POSTGRESQL PERSISTENTE
+    st.info("✅ Usando Base de Datos PostgreSQL (Persistente en la Nube)")
