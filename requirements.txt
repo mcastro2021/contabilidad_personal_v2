@@ -5,3 +5,5 @@ plotly
 streamlit-lottie
 psycopg2-binary
 python-dotenv
+scikit-learn
+numpy
