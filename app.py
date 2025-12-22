@@ -16,7 +16,7 @@ def make_hashes(password):
 
 def check_hashes(password, hashed_text):
     if make_hashes(password) == hashed_text:
-        return resulting_hash
+        return True
     return False
 
 # --- FUNCIONES DE FORMATO ---
@@ -42,18 +42,13 @@ def init_db():
     conn = sqlite3.connect(DB_NAME)
     c = conn.cursor()
     
-    # Tabla Movimientos
+    # Tablas
     c.execute('''CREATE TABLE IF NOT EXISTS movimientos 
                  (id INTEGER PRIMARY KEY AUTOINCREMENT, fecha TEXT, mes TEXT, 
                   tipo TEXT, grupo TEXT, tipo_gasto TEXT, cuota TEXT, monto REAL, moneda TEXT,
                   forma_pago TEXT, fecha_pago TEXT)''')
-    
-    # Tabla Grupos
     c.execute('''CREATE TABLE IF NOT EXISTS grupos (nombre TEXT PRIMARY KEY)''')
-    
-    # Tabla Usuarios (NUEVA)
-    c.execute('''CREATE TABLE IF NOT EXISTS users 
-                 (username TEXT PRIMARY KEY, password TEXT)''')
+    c.execute('''CREATE TABLE IF NOT EXISTS users (username TEXT PRIMARY KEY, password TEXT)''')
 
     # Datos Semilla Grupos
     c.execute("SELECT count(*) FROM grupos")
@@ -64,7 +59,6 @@ def init_db():
     # Datos Semilla Usuario Admin (admin / admin123)
     c.execute("SELECT count(*) FROM users")
     if c.fetchone()[0] == 0:
-        # La contraseña es "admin123" hasheada
         pwd_hash = make_hashes("admin123")
         c.execute("INSERT INTO users (username, password) VALUES (?,?)", ("admin", pwd_hash))
 
@@ -93,12 +87,11 @@ if 'username' not in st.session_state:
     st.session_state['username'] = ''
 
 # ==========================================
-# SISTEMA DE LOGIN
+# LOGIN PAGE
 # ==========================================
 def login_page():
     st.markdown("<h1 style='text-align: center;'>🔐 SMART FINANCE ACCESS</h1>", unsafe_allow_html=True)
     st.write("")
-    
     col1, col2, col3 = st.columns([1, 2, 1])
     with col2:
         with st.form("login_form"):
@@ -122,16 +115,15 @@ def login_page():
                 else:
                     st.error("Usuario o contraseña incorrectos")
 
-# SI NO ESTÁ LOGUEADO -> MOSTRAR LOGIN Y DETENER
 if not st.session_state['logged_in']:
     login_page()
-    st.stop()  # Detiene la ejecución aquí para que no cargue el resto
+    st.stop()
 
 # ==========================================
-# APLICACIÓN PRINCIPAL (SOLO SI LOGUEADO)
+# APP PRINCIPAL
 # ==========================================
 
-# Sidebar: Logout y Datos
+# Sidebar
 with st.sidebar:
     st.write(f"👤 Usuario: **{st.session_state['username']}**")
     if st.button("Cerrar Sesión"):
@@ -141,17 +133,17 @@ with st.sidebar:
 
 dolar_val, dolar_info = get_dolar()
 
-# --- CABECERA ---
+# Header
 st.title("SMART FINANCE PRO 2026")
 mes_global = st.selectbox("📅 MES DE TRABAJO:", MESES)
 
-# --- CARGA DE DATOS ---
+# Data
 conn = sqlite3.connect(DB_NAME)
 grupos_db = pd.read_sql("SELECT nombre FROM grupos ORDER BY nombre ASC", conn)['nombre'].tolist()
 df_all = pd.read_sql("SELECT * FROM movimientos", conn)
 conn.close()
 
-# --- SIDEBAR: ALTA NUEVA ---
+# Formulario Carga
 st.sidebar.header("📥 CARGAR NUEVO")
 with st.sidebar.form("form_carga", clear_on_submit=True):
     t_sel = st.selectbox("TIPO", ["GASTO", "GANANCIA"])
@@ -178,7 +170,7 @@ with st.sidebar.form("form_carga", clear_on_submit=True):
                 (str(datetime.date.today()), mes_target, t_sel, g_sel, concepto, lbl_cuota, m_final, mon_sel, f_pago, fecha_v.strftime('%Y-%m-%d')))
         conn.commit(); conn.close(); st.success("Guardado"); st.rerun()
 
-# --- PESTAÑAS ---
+# Tabs
 tab_dash, tab_conf = st.tabs(["📊 PLANILLA", "⚙️ CONFIGURACIÓN"])
 
 with tab_dash:
@@ -187,7 +179,7 @@ with tab_dash:
     df_mes = df_all[df_all['mes'] == mes_global].copy()
     
     if not df_mes.empty:
-        # --- MÉTRICAS ---
+        # Metricas
         ing_ars = df_mes[(df_mes['moneda']=="ARS")&(df_mes['tipo']=="GANANCIA")]['monto'].sum()
         gas_ars = df_mes[(df_mes['moneda']=="ARS")&(df_mes['tipo']=="GASTO")]['monto'].sum()
         res_ars = ing_ars - gas_ars
@@ -205,7 +197,7 @@ with tab_dash:
         
         st.divider()
         
-        # --- GRÁFICOS ---
+        # Graficos
         df_mes_graf = df_mes.copy()
         df_mes_graf['m_ars_v'] = df_mes_graf.apply(lambda x: x['monto'] * dolar_val if x['moneda'] == 'USD' else x['monto'], axis=1)
         
@@ -225,7 +217,7 @@ with tab_dash:
 
         st.divider()
 
-        # --- TABLA JERÁRQUICA ---
+        # Tabla
         df_view = df_mes.copy()
         df_view['monto_visual'] = df_view.apply(lambda x: formato_moneda_visual(x['monto'], x['moneda']), axis=1)
         df_view = df_view.sort_values(by=["grupo", "tipo_gasto"])
@@ -251,7 +243,7 @@ with tab_dash:
             selection_mode="single-row"
         )
 
-        # --- EDICIÓN ---
+        # Edicion
         if selection["selection"]["rows"]:
             st.divider()
             st.markdown("##### ✏️ EDITAR SELECCIÓN")
@@ -294,6 +286,8 @@ with tab_dash:
 
 with tab_conf:
     st.subheader("⚙️ ADMINISTRACIÓN")
+    
+    # GESTION GRUPOS
     st.write("#### 🏷️ GRUPOS")
     c1, c2, c3 = st.columns(3)
     with c1:
@@ -314,6 +308,55 @@ with tab_conf:
             g_del = st.selectbox("Eliminar", grupos_db)
             if st.button("🗑️ Borrar"):
                 conn = sqlite3.connect(DB_NAME); conn.execute("DELETE FROM grupos WHERE nombre=?", (g_del,)); conn.commit(); conn.close(); st.rerun()
+
+    st.divider()
+    
+    # SEGURIDAD Y USUARIOS
+    st.write("#### 🔐 SEGURIDAD Y USUARIOS")
+    
+    # CAMBIAR CONTRASEÑA
+    with st.expander("🔑 Cambiar mi contraseña"):
+        with st.form("change_pass"):
+            current_pass = st.text_input("Contraseña Actual", type="password")
+            new_pass = st.text_input("Nueva Contraseña", type="password")
+            confirm_pass = st.text_input("Repetir Nueva Contraseña", type="password")
+            if st.form_submit_button("Actualizar Contraseña"):
+                conn = sqlite3.connect(DB_NAME)
+                c = conn.cursor()
+                # Verificar contraseña actual
+                current_user = st.session_state['username']
+                hashed_current = make_hashes(current_pass)
+                c.execute("SELECT * FROM users WHERE username = ? AND password = ?", (current_user, hashed_current))
+                if c.fetchone():
+                    if new_pass == confirm_pass:
+                        new_hashed = make_hashes(new_pass)
+                        c.execute("UPDATE users SET password = ? WHERE username = ?", (new_hashed, current_user))
+                        conn.commit()
+                        st.success("Contraseña actualizada exitosamente.")
+                    else:
+                        st.error("Las nuevas contraseñas no coinciden.")
+                else:
+                    st.error("La contraseña actual es incorrecta.")
+                conn.close()
+
+    # CREAR NUEVO USUARIO
+    with st.expander("➕ Crear nuevo usuario"):
+        with st.form("new_user"):
+            new_username = st.text_input("Nuevo Usuario")
+            new_user_pass = st.text_input("Contraseña", type="password")
+            if st.form_submit_button("Crear Usuario"):
+                if new_username and new_user_pass:
+                    conn = sqlite3.connect(DB_NAME)
+                    c = conn.cursor()
+                    try:
+                        c.execute("INSERT INTO users (username, password) VALUES (?,?)", (new_username, make_hashes(new_user_pass)))
+                        conn.commit()
+                        st.success(f"Usuario {new_username} creado.")
+                    except sqlite3.IntegrityError:
+                        st.error("El usuario ya existe.")
+                    conn.close()
+                else:
+                    st.error("Complete todos los campos.")
 
     st.divider()
     st.write("#### 👯 CLONAR MES")
