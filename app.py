@@ -2,6 +2,7 @@ import streamlit as st
 import pandas as pd
 import psycopg2
 import os
+import sqlite3  # <--- ESTA ERA LA LÍNEA QUE FALTABA
 import requests
 import datetime
 import plotly.express as px
@@ -11,7 +12,7 @@ from streamlit_lottie import st_lottie
 import tempfile
 from dotenv import load_dotenv
 import numpy as np
-from sklearn.linear_model import LinearRegression # LIBRERÍA DE IA
+from sklearn.linear_model import LinearRegression 
 
 # --- CARGAR VARIABLES ---
 load_dotenv()
@@ -29,7 +30,7 @@ def load_lottieurl(url):
 
 LOTTIE_FINANCE = "https://lottie.host/02a55953-2736-4763-b183-116515b81045/L1O1fW89yB.json" 
 LOTTIE_LOGIN = "https://lottie.host/93291880-990e-473d-82f5-b6574c831168/v2x2QkL6r4.json"
-LOTTIE_AI = "https://lottie.host/8078f4a1-0e77-49f3-8027-4638a1670985/9F7o7r2X0q.json" # Robot AI
+LOTTIE_AI = "https://lottie.host/8078f4a1-0e77-49f3-8027-4638a1670985/9F7o7r2X0q.json"
 
 def make_hashes(password):
     return hashlib.sha256(str.encode(password)).hexdigest()
@@ -293,7 +294,7 @@ with tab1:
                     c.execute("DELETE FROM movimientos WHERE id=%s", (id_mov,)); conn.commit(); conn.close(); st.warning("Eliminado"); st.rerun()
     else: st.info("Sin datos.")
 
-with tab2: # NUEVA PESTAÑA IA
+with tab2: # IA
     c1, c2 = st.columns([1,3])
     with c1:
         lottie_ai = load_lottieurl(LOTTIE_AI)
@@ -306,27 +307,22 @@ with tab2: # NUEVA PESTAÑA IA
     df_ai = df_all[df_all['tipo'] == 'GASTO'].copy()
     
     if len(df_ai) > 0:
-        # Convertir todo a ARS para el modelo
         df_ai['monto_normalizado'] = df_ai.apply(lambda x: x['monto'] * dolar_val if x['moneda'] == 'USD' else x['monto'], axis=1)
-        
-        # Mapear meses a números (Enero=1, Febrero=2...) para la regresión
         mapa_meses = {m: i+1 for i, m in enumerate(MESES)}
         df_ai['mes_num'] = df_ai['mes'].map(mapa_meses)
-        
-        # Agrupar por mes
         df_monthly = df_ai.groupby('mes_num')['monto_normalizado'].sum().reset_index().sort_values('mes_num')
         
         if len(df_monthly) >= 2:
-            # 2. ENTRENAMIENTO DEL MODELO (Scikit-Learn)
-            X = df_monthly['mes_num'].values.reshape(-1, 1) # Features (Meses)
-            y = df_monthly['monto_normalizado'].values      # Target (Gastos)
+            # 2. ENTRENAMIENTO
+            X = df_monthly['mes_num'].values.reshape(-1, 1)
+            y = df_monthly['monto_normalizado'].values
             
             model = LinearRegression()
             model.fit(X, y)
             
             # 3. PREDICCIÓN
             proximo_mes_num = df_monthly['mes_num'].max() + 1
-            if proximo_mes_num > 12: proximo_mes_num = 1 # Vuelta al año (simplificado)
+            if proximo_mes_num > 12: proximo_mes_num = 1
             
             prediccion_futura = model.predict([[proximo_mes_num]])[0]
             nombre_proximo_mes = MESES[proximo_mes_num - 1] if proximo_mes_num <= 12 else "Próximo Ciclo"
@@ -338,19 +334,13 @@ with tab2: # NUEVA PESTAÑA IA
             
             col_kpi2.info("El modelo analiza la tendencia de tus meses anteriores para proyectar el siguiente.")
             
-            # Gráfico de Tendencia vs Realidad
             fig = go.Figure()
-            # Datos Reales
             fig.add_trace(go.Scatter(x=[MESES[i-1] for i in df_monthly['mes_num']], y=df_monthly['monto_normalizado'], mode='lines+markers', name='Gasto Real', line=dict(color='#ff4b4b')))
-            # Línea de Tendencia (Regresión)
             y_pred = model.predict(X)
             fig.add_trace(go.Scatter(x=[MESES[i-1] for i in df_monthly['mes_num']], y=y_pred, mode='lines', name='Tendencia IA', line=dict(dash='dot', color='gray')))
-            # Punto Futuro
             fig.add_trace(go.Scatter(x=[nombre_proximo_mes], y=[prediccion_futura], mode='markers', name='Predicción', marker=dict(size=12, color='#00cc96', symbol='star')))
-            
             fig.update_layout(title="Proyección de Gastos", template="plotly_white")
             st.plotly_chart(fig, use_container_width=True)
-            
         else:
             st.warning("⚠️ Necesitas datos de al menos 2 meses distintos para que la IA pueda detectar tendencias.")
     else:
@@ -358,16 +348,19 @@ with tab2: # NUEVA PESTAÑA IA
 
 with tab3: # CONFIGURACION
     st.header("⚙️ Configuración")
-    # MIGRACIÓN
+    
     st.markdown("### 📤 MIGRACIÓN DE DATOS")
     archivo_db = st.file_uploader("Sube tu archivo .db", type=["db", "sqlite", "sqlite3"])
     if archivo_db and st.button("🔄 INICIAR MIGRACIÓN"):
         try:
             with tempfile.NamedTemporaryFile(delete=False) as tmp_file:
                 tmp_file.write(archivo_db.getvalue()); tmp_path = tmp_file.name
+            
+            # AQUÍ ES DONDE NECESITAMOS sqlite3
             conn_old = sqlite3.connect(tmp_path)
             df_old = pd.read_sql("SELECT * FROM movimientos", conn_old)
             conn_old.close()
+            
             conn_new = get_db_connection(); c_new = conn_new.cursor()
             count = 0
             for _, row in df_old.iterrows():
