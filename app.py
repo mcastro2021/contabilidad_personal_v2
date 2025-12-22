@@ -2,7 +2,7 @@ import streamlit as st
 import pandas as pd
 import psycopg2
 import os
-import sqlite3  # <--- ESTA ERA LA LÍNEA QUE FALTABA
+import sqlite3
 import requests
 import datetime
 import plotly.express as px
@@ -313,25 +313,18 @@ with tab2: # IA
         df_monthly = df_ai.groupby('mes_num')['monto_normalizado'].sum().reset_index().sort_values('mes_num')
         
         if len(df_monthly) >= 2:
-            # 2. ENTRENAMIENTO
             X = df_monthly['mes_num'].values.reshape(-1, 1)
             y = df_monthly['monto_normalizado'].values
-            
             model = LinearRegression()
             model.fit(X, y)
-            
-            # 3. PREDICCIÓN
             proximo_mes_num = df_monthly['mes_num'].max() + 1
             if proximo_mes_num > 12: proximo_mes_num = 1
-            
             prediccion_futura = model.predict([[proximo_mes_num]])[0]
             nombre_proximo_mes = MESES[proximo_mes_num - 1] if proximo_mes_num <= 12 else "Próximo Ciclo"
             
-            # 4. VISUALIZACIÓN
             col_kpi1, col_kpi2 = st.columns(2)
             col_kpi1.metric(f"Gasto Estimado {nombre_proximo_mes}", formato_moneda_visual(prediccion_futura, "ARS"), 
                             delta=f"{((prediccion_futura - y[-1])/y[-1])*100:.1f}% vs mes anterior", delta_color="inverse")
-            
             col_kpi2.info("El modelo analiza la tendencia de tus meses anteriores para proyectar el siguiente.")
             
             fig = go.Figure()
@@ -356,7 +349,6 @@ with tab3: # CONFIGURACION
             with tempfile.NamedTemporaryFile(delete=False) as tmp_file:
                 tmp_file.write(archivo_db.getvalue()); tmp_path = tmp_file.name
             
-            # AQUÍ ES DONDE NECESITAMOS sqlite3
             conn_old = sqlite3.connect(tmp_path)
             df_old = pd.read_sql("SELECT * FROM movimientos", conn_old)
             conn_old.close()
@@ -372,6 +364,32 @@ with tab3: # CONFIGURACION
         except Exception as e: st.error(f"Error: {e}")
 
     st.divider()
+
+    # --- ZONA DE PELIGRO (RESET) ---
+    with st.expander("💀 ZONA DE PELIGRO (BORRAR TODO)"):
+        st.warning("⚠️ ESTA ACCIÓN NO SE PUEDE DESHACER. BORRARÁ TODOS LOS MOVIMIENTOS, USUARIOS Y GRUPOS.")
+        confirm_text = st.text_input("Escribe 'ELIMINAR' para confirmar:")
+
+        if st.button("💣 BORRAR BASE DE DATOS COMPLETA", type="primary"):
+            if confirm_text == "ELIMINAR":
+                conn = get_db_connection()
+                c = conn.cursor()
+                # TRUNCATE + RESTART IDENTITY (Reinicia IDs a 1) + CASCADE
+                c.execute("TRUNCATE TABLE movimientos, grupos, users RESTART IDENTITY CASCADE;")
+                conn.commit()
+                conn.close()
+                
+                # Re-sembrar datos iniciales (Admin y Grupos)
+                init_db()
+                
+                st.success("Base de datos reiniciada a fábrica.")
+                st.session_state['logged_in'] = False
+                st.rerun()
+            else:
+                st.error("Texto de confirmación incorrecto.")
+
+    st.divider()
+
     # GESTION GRUPOS
     with st.expander("🏷️ GESTIONAR GRUPOS"):
         c1, c2 = st.columns(2)
