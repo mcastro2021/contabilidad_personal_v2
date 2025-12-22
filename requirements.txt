@@ -4,3 +4,4 @@ requests
 plotly
 streamlit-lottie
 psycopg2-binary
+python-dotenv

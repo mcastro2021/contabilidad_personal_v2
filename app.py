@@ -2,13 +2,18 @@ import streamlit as st
 import pandas as pd
 import psycopg2
 import os
-import sqlite3 # Necesario para leer el archivo subido
+import sqlite3
 import requests
 import datetime
 import plotly.express as px
 import hashlib
 from streamlit_lottie import st_lottie
-import tempfile # Para manejar el archivo subido temporalmente
+import tempfile
+from dotenv import load_dotenv  # IMPORTAR PARA VARIABLES LOCALES
+
+# --- CARGAR VARIABLES DE ENTORNO ---
+# Busca el archivo .env si estás en local. En Render no hará nada (y está bien).
+load_dotenv()
 
 # --- CONFIGURACIÓN ---
 st.set_page_config(page_title="SMART FINANCE PRO", layout="wide")
@@ -52,49 +57,50 @@ def procesar_monto_input(texto):
 # --- CONEXIÓN BASE DE DATOS (POSTGRESQL) ---
 def get_db_connection():
     DATABASE_URL = os.environ.get('DATABASE_URL')
-    if not DATABASE_URL:
-        # Fallback para pruebas locales si no hay variable de entorno
-        st.warning("⚠️ Modo Local (SQLite) - Configura DATABASE_URL en Render para modo Nube.")
-        return sqlite3.connect("finanzas_local_temp.db", check_same_thread=False)
     
-    conn = psycopg2.connect(DATABASE_URL)
-    return conn
+    if not DATABASE_URL:
+        st.error("⚠️ Error Crítico: No se encontró la variable DATABASE_URL.")
+        st.info("Si estás en local: Crea un archivo .env con DATABASE_URL=postgres://...")
+        st.info("Si estás en Render: Configura la Environment Variable en el Dashboard.")
+        st.stop()
+    
+    try:
+        conn = psycopg2.connect(DATABASE_URL)
+        return conn
+    except Exception as e:
+        st.error(f"No se pudo conectar a la base de datos: {e}")
+        st.stop()
 
 def init_db():
     conn = get_db_connection()
     c = conn.cursor()
     
-    # Detectar si es Postgres o SQLite para la sintaxis
-    es_postgres = hasattr(conn, 'dsn') # Propiedad unica de psycopg2
-    
-    # SQL Dinámico según motor
-    id_type = "SERIAL" if es_postgres else "INTEGER"
-    
-    c.execute(f'''CREATE TABLE IF NOT EXISTS movimientos 
-                 (id {id_type} PRIMARY KEY, fecha TEXT, mes TEXT, 
+    # Crear tablas (Sintaxis PostgreSQL)
+    c.execute('''CREATE TABLE IF NOT EXISTS movimientos 
+                 (id SERIAL PRIMARY KEY, fecha TEXT, mes TEXT, 
                   tipo TEXT, grupo TEXT, tipo_gasto TEXT, cuota TEXT, monto REAL, moneda TEXT,
                   forma_pago TEXT, fecha_pago TEXT)''')
     
     c.execute('''CREATE TABLE IF NOT EXISTS grupos (nombre TEXT PRIMARY KEY)''')
     c.execute('''CREATE TABLE IF NOT EXISTS users (username TEXT PRIMARY KEY, password TEXT)''')
 
-    # Datos iniciales
-    placeholder = "%s" if es_postgres else "?"
-    ignore_clause = "ON CONFLICT DO NOTHING" if es_postgres else "OR IGNORE"
-
+    # Datos iniciales (Grupos)
     c.execute("SELECT count(*) FROM grupos")
     if c.fetchone()[0] == 0:
         grupos_base = [("AHORRO MANUEL",), ("CASA",), ("AUTO",), ("VARIOS",)]
-        c.executemany(f"INSERT {ignore_clause} INTO grupos VALUES ({placeholder})", grupos_base)
+        # Usamos %s para Postgres y ON CONFLICT para evitar errores
+        c.executemany("INSERT INTO grupos VALUES (%s) ON CONFLICT DO NOTHING", grupos_base)
         
+    # Datos iniciales (Usuario Admin)
     c.execute("SELECT count(*) FROM users")
     if c.fetchone()[0] == 0:
-        c.execute(f"INSERT {ignore_clause} INTO users (username, password) VALUES ({placeholder}, {placeholder})", ("admin", make_hashes("admin123")))
+        c.execute("INSERT INTO users (username, password) VALUES (%s, %s) ON CONFLICT DO NOTHING", 
+                  ("admin", make_hashes("admin123")))
 
     conn.commit()
     conn.close()
 
-# Inicializar DB
+# Inicializar DB al arrancar
 init_db()
 
 # --- CONSTANTES ---
@@ -127,9 +133,7 @@ def login_page():
             if st.form_submit_button("Entrar", use_container_width=True):
                 conn = get_db_connection()
                 c = conn.cursor()
-                es_postgres = hasattr(conn, 'dsn')
-                ph = "%s" if es_postgres else "?"
-                c.execute(f"SELECT * FROM users WHERE username={ph} AND password={ph}", (u, make_hashes(p)))
+                c.execute("SELECT * FROM users WHERE username=%s AND password=%s", (u, make_hashes(p)))
                 if c.fetchall():
                     st.session_state['logged_in'] = True
                     st.session_state['username'] = u
@@ -150,10 +154,12 @@ with st.sidebar:
     if lottie_fin: st_lottie(lottie_fin, height=100, key="sidebar_anim")
     st.write(f"👤 **{st.session_state['username']}**")
     
-    # Indicador de tipo de Base de Datos
-    db_type = "PostgreSQL (Nube)" if os.environ.get('DATABASE_URL') else "SQLite (Local)"
-    st.caption(f"DB: {db_type}")
-    
+    # Indicador visual de conexión
+    if os.environ.get('DATABASE_URL'):
+        st.caption("🟢 Conectado a PostgreSQL")
+    else:
+        st.caption("🔴 Sin conexión DB")
+
     if st.button("Salir"):
         st.session_state['logged_in'] = False
         st.rerun()
@@ -166,7 +172,7 @@ mes_global = st.selectbox("📅 MES DE TRABAJO:", MESES)
 
 # Carga de datos
 conn = get_db_connection()
-# Pandas necesita una conexión SQLAlchemy o DBAPI2 standard. Psycopg2 funciona bien.
+# Nota: Pandas necesita una conexión compatible. psycopg2 funciona.
 grupos_db = pd.read_sql("SELECT nombre FROM grupos ORDER BY nombre ASC", conn)['nombre'].tolist()
 df_all = pd.read_sql("SELECT * FROM movimientos", conn)
 conn.close()
@@ -189,8 +195,6 @@ with st.sidebar.form("alta"):
         m_final = procesar_monto_input(m_input)
         conn = get_db_connection()
         c = conn.cursor()
-        es_postgres = hasattr(conn, 'dsn')
-        ph = "%s" if es_postgres else "?"
         
         idx_base = MESES.index(mes_global)
         for i in range(int(c_act), int(c_tot)+1):
@@ -199,8 +203,12 @@ with st.sidebar.form("alta"):
             cuota = f"{i}/{int(c_tot)}"
             fecha_v = f_fecha + pd.DateOffset(months=offset)
             
-            c.execute(f"INSERT INTO movimientos (fecha, mes, tipo, grupo, tipo_gasto, cuota, monto, moneda, forma_pago, fecha_pago) VALUES ({ph},{ph},{ph},{ph},{ph},{ph},{ph},{ph},{ph},{ph})",
+            # INSERT Postgres style (%s)
+            c.execute("""INSERT INTO movimientos 
+                (fecha, mes, tipo, grupo, tipo_gasto, cuota, monto, moneda, forma_pago, fecha_pago) 
+                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
                 (str(datetime.date.today()), mes_t, t_sel, g_sel, concepto, cuota, m_final, mon_sel, f_pago, fecha_v.strftime('%Y-%m-%d')))
+        
         conn.commit()
         conn.close()
         st.balloons()
@@ -257,6 +265,7 @@ with tab1:
         df_view = df_mes.copy()
         df_view['monto_visual'] = df_view.apply(lambda x: formato_moneda_visual(x['monto'], x['moneda']), axis=1)
         
+        # Quitamos TIPO y GRUPO de las columnas porque están en los títulos
         cols_show = ["tipo_gasto", "monto_visual", "cuota", "forma_pago", "fecha_pago"]
         
         col_cfg = {
@@ -324,21 +333,20 @@ with tab1:
                 
                 b1, b2 = st.columns([1, 1])
                 conn = get_db_connection()
-                es_postgres = hasattr(conn, 'dsn')
-                ph = "%s" if es_postgres else "?"
                 c = conn.cursor()
 
                 if b1.form_submit_button("💾 GUARDAR CAMBIOS"):
                     m_f = procesar_monto_input(new_m)
-                    c.execute(f"""UPDATE movimientos SET 
-                                 tipo={ph}, grupo={ph}, tipo_gasto={ph}, monto={ph}, moneda={ph}, cuota={ph}, forma_pago={ph}, fecha_pago={ph} 
-                                 WHERE id={ph}""",
+                    # UPDATE Postgres style (%s)
+                    c.execute("""UPDATE movimientos SET 
+                                 tipo=%s, grupo=%s, tipo_gasto=%s, monto=%s, moneda=%s, cuota=%s, forma_pago=%s, fecha_pago=%s 
+                                 WHERE id=%s""",
                                  (new_tipo, new_g, new_c, m_f, new_mon, new_cuota, new_pago, str(new_f), id_mov))
                     conn.commit()
                     st.success("Editado correctamente"); st.rerun()
                     
                 if b2.form_submit_button("❌ ELIMINAR", type="primary"):
-                    c.execute(f"DELETE FROM movimientos WHERE id={ph}", (id_mov,))
+                    c.execute("DELETE FROM movimientos WHERE id=%s", (id_mov,))
                     conn.commit()
                     st.warning("Eliminado"); st.rerun()
                 conn.close()
@@ -357,35 +365,32 @@ with tab2:
     if archivo_db is not None:
         if st.button("🔄 INICIAR MIGRACIÓN"):
             try:
-                # Guardar el archivo temporalmente
+                # Guardar temp
                 with tempfile.NamedTemporaryFile(delete=False) as tmp_file:
                     tmp_file.write(archivo_db.getvalue())
                     tmp_path = tmp_file.name
 
-                # Conectar a la DB vieja (SQLite)
+                # Leer SQLite
                 conn_old = sqlite3.connect(tmp_path)
                 df_old = pd.read_sql("SELECT * FROM movimientos", conn_old)
                 conn_old.close()
 
-                # Conectar a la DB nueva (Postgres)
+                # Escribir Postgres
                 conn_new = get_db_connection()
                 c_new = conn_new.cursor()
-                es_postgres = hasattr(conn_new, 'dsn')
-                ph = "%s" if es_postgres else "?"
-
-                # Insertar datos
+                
                 count = 0
                 for _, row in df_old.iterrows():
-                    c_new.execute(f"""INSERT INTO movimientos 
+                    c_new.execute("""INSERT INTO movimientos 
                         (fecha, mes, tipo, grupo, tipo_gasto, cuota, monto, moneda, forma_pago, fecha_pago) 
-                        VALUES ({ph},{ph},{ph},{ph},{ph},{ph},{ph},{ph},{ph},{ph})""",
+                        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
                         (row['fecha'], row['mes'], row['tipo'], row['grupo'], row['tipo_gasto'], 
                          row['cuota'], row['monto'], row['moneda'], row['forma_pago'], row['fecha_pago']))
                     count += 1
                 
                 conn_new.commit()
                 conn_new.close()
-                st.success(f"✅ ¡Éxito! Se migraron {count} movimientos a la nueva base de datos.")
+                st.success(f"✅ ¡Éxito! Se migraron {count} movimientos.")
             except Exception as e:
                 st.error(f"Error en la migración: {e}")
 
@@ -394,20 +399,17 @@ with tab2:
     with st.expander("🏷️ GESTIONAR GRUPOS"):
         c1, c2 = st.columns(2)
         conn = get_db_connection()
-        es_postgres = hasattr(conn, 'dsn')
-        ph = "%s" if es_postgres else "?"
         c = conn.cursor()
         
         with c1:
             n_g = st.text_input("Nuevo Grupo").upper()
             if st.button("Crear Grupo"):
-                ignore = "ON CONFLICT DO NOTHING" if es_postgres else "OR IGNORE"
-                c.execute(f"INSERT {ignore} INTO grupos VALUES ({ph})", (n_g,))
+                c.execute("INSERT INTO grupos VALUES (%s) ON CONFLICT DO NOTHING", (n_g,))
                 conn.commit(); st.rerun()
         with c2:
             d_g = st.selectbox("Eliminar Grupo", grupos_db)
             if st.button("Eliminar"):
-                c.execute(f"DELETE FROM grupos WHERE nombre={ph}", (d_g,))
+                c.execute("DELETE FROM grupos WHERE nombre=%s", (d_g,))
                 conn.commit(); st.rerun()
         conn.close()
 
@@ -418,7 +420,7 @@ with tab2:
             conn = get_db_connection()
             c = conn.cursor()
             try:
-                c.execute(f"INSERT INTO users VALUES ({ph}, {ph})", (u_new, make_hashes(p_new)))
+                c.execute("INSERT INTO users VALUES (%s, %s) ON CONFLICT DO NOTHING", (u_new, make_hashes(p_new)))
                 conn.commit()
                 st.success("Creado")
             except Exception as e:
@@ -433,15 +435,12 @@ with tab2:
         if st.button("Cambiar"):
             conn = get_db_connection()
             c = conn.cursor()
-            es_postgres = hasattr(conn, 'dsn')
-            ph = "%s" if es_postgres else "?"
-            
             curr_hash = make_hashes(curr)
             user = st.session_state['username']
-            c.execute(f"SELECT * FROM users WHERE username={ph} AND password={ph}", (user, curr_hash))
+            c.execute("SELECT * FROM users WHERE username=%s AND password=%s", (user, curr_hash))
             if c.fetchone():
                 if n1 == n2:
-                    c.execute(f"UPDATE users SET password={ph} WHERE username={ph}", (make_hashes(n1), user))
+                    c.execute("UPDATE users SET password=%s WHERE username=%s", (make_hashes(n1), user))
                     conn.commit(); st.success("Cambiada!"); st.session_state['logged_in']=False; st.rerun()
                 else: st.error("No coinciden")
             else: st.error("Contraseña actual incorrecta")
@@ -456,17 +455,14 @@ with tab2:
     if c3.button("🚀 CLONAR"):
         conn = get_db_connection()
         c = conn.cursor()
-        es_postgres = hasattr(conn, 'dsn')
-        ph = "%s" if es_postgres else "?"
-        
         src = pd.read_sql(f"SELECT * FROM movimientos WHERE mes='{m_src}'", conn)
         if not src.empty:
             targets = MESES if m_dst == "TODO EL AÑO" else [m_dst]
             for t in targets:
                 if t == m_src: continue
-                c.execute(f"DELETE FROM movimientos WHERE mes={ph}", (t,))
+                c.execute("DELETE FROM movimientos WHERE mes=%s", (t,))
                 for _, r in src.iterrows():
-                    c.execute(f"INSERT INTO movimientos (fecha, mes, tipo, grupo, tipo_gasto, cuota, monto, moneda, forma_pago, fecha_pago) VALUES ({ph},{ph},{ph},{ph},{ph},{ph},{ph},{ph},{ph},{ph})",
+                    c.execute("INSERT INTO movimientos (fecha, mes, tipo, grupo, tipo_gasto, cuota, monto, moneda, forma_pago, fecha_pago) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
                         (str(datetime.date.today()), t, r['tipo'], r['grupo'], r['tipo_gasto'], r['cuota'], r['monto'], r['moneda'], r['forma_pago'], r['fecha_pago']))
             conn.commit(); st.success("Clonado!"); st.rerun()
         conn.close()
