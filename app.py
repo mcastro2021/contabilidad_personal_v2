@@ -13,13 +13,18 @@ import tempfile
 from dotenv import load_dotenv
 import numpy as np
 from sklearn.linear_model import LinearRegression 
-from openai import OpenAI # Usamos el cliente oficial directo
+from openai import OpenAI
 
 # --- CARGAR VARIABLES ---
 load_dotenv()
 
 # --- CONFIGURACIÓN ---
 st.set_page_config(page_title="SMART FINANCE PRO", layout="wide")
+
+# --- CONSTANTES ---
+MESES = ["Enero", "Febrero", "Marzo", "Abril", "Mayo", "Junio", 
+         "Julio", "Agosto", "Septiembre", "Octubre", "Noviembre", "Diciembre"]
+OPCIONES_PAGO = ["Bancario", "Efectivo", "Transferencia", "Tarjeta de Debito", "Tarjeta de Credito"]
 
 # --- FUNCIONES AUXILIARES ---
 def load_lottieurl(url):
@@ -79,7 +84,6 @@ def init_db():
     c.execute('''CREATE TABLE IF NOT EXISTS grupos (nombre TEXT PRIMARY KEY)''')
     c.execute('''CREATE TABLE IF NOT EXISTS users (username TEXT PRIMARY KEY, password TEXT)''')
     
-    # Datos semilla
     c.execute("SELECT count(*) FROM grupos")
     if c.fetchone()[0] == 0:
         c.executemany("INSERT INTO grupos VALUES (%s) ON CONFLICT DO NOTHING", [("AHORRO MANUEL",), ("CASA",), ("AUTO",), ("VARIOS",)])
@@ -93,10 +97,60 @@ def init_db():
 
 init_db()
 
-# --- CONSTANTES ---
-MESES = ["Enero", "Febrero", "Marzo", "Abril", "Mayo", "Junio", 
-         "Julio", "Agosto", "Septiembre", "Octubre", "Noviembre", "Diciembre"]
-OPCIONES_PAGO = ["Bancario", "Efectivo", "Transferencia", "Tarjeta de Debito", "Tarjeta de Credito"]
+# --- AUTOMATIZACIÓN DE SALDOS (NUEVA LÓGICA) ---
+def actualizar_saldos_en_cascada(mes_modificado):
+    """
+    Recalcula el saldo del mes modificado y actualiza el 'Ahorro Mes Anterior'
+    del mes siguiente. Repite el proceso hasta Diciembre.
+    """
+    try:
+        conn = get_db_connection()
+        c = conn.cursor()
+        
+        # Encontramos el índice numérico del mes donde ocurrió el cambio
+        idx_inicio = MESES.index(mes_modificado)
+        
+        # Iteramos desde el mes actual hasta Noviembre (para actualizar hasta Diciembre)
+        for i in range(idx_inicio, 11): # 0 a 10 (Enero a Noviembre)
+            mes_actual = MESES[i]
+            mes_siguiente = MESES[i+1]
+            
+            # 1. Calcular Saldo Real del Mes Actual (Ingresos - Gastos) en ARS
+            c.execute("""
+                SELECT 
+                    COALESCE(SUM(CASE WHEN tipo = 'GANANCIA' THEN monto ELSE 0 END), 0) -
+                    COALESCE(SUM(CASE WHEN tipo = 'GASTO' THEN monto ELSE 0 END), 0)
+                FROM movimientos 
+                WHERE mes = %s AND moneda = 'ARS'
+            """, (mes_actual,))
+            
+            saldo_actual = c.fetchone()[0] or 0.0
+            
+            # 2. Insertar o Actualizar ese saldo en el Mes Siguiente
+            # Buscamos si ya existe la fila 'Ahorro Mes Anterior' en el mes siguiente
+            c.execute("""SELECT id FROM movimientos 
+                         WHERE mes = %s AND tipo_gasto = 'Ahorro Mes Anterior'""", (mes_siguiente,))
+            row = c.fetchone()
+            
+            fecha_hoy = str(datetime.date.today())
+            
+            if row:
+                # Si existe, actualizamos el monto
+                c.execute("""UPDATE movimientos SET monto = %s WHERE id = %s""", (saldo_actual, row[0]))
+            else:
+                # Si no existe, lo creamos
+                c.execute("""INSERT INTO movimientos 
+                    (fecha, mes, tipo, grupo, tipo_gasto, cuota, monto, moneda, forma_pago, fecha_pago) 
+                    VALUES (%s, %s, 'GANANCIA', 'AHORRO MANUEL', 'Ahorro Mes Anterior', '1/1', %s, 'ARS', 'Automático', %s)""",
+                    (fecha_hoy, mes_siguiente, saldo_actual, fecha_hoy))
+            
+            # Al hacer commit aquí, el saldo del mes siguiente ya incluye el nuevo 'Ahorro Mes Anterior'
+            # para la siguiente iteración del bucle.
+            conn.commit()
+            
+        conn.close()
+    except Exception as e:
+        st.error(f"Error en la automatización de saldos: {e}")
 
 @st.cache_data(ttl=60)
 def get_dolar():
@@ -178,6 +232,8 @@ with st.sidebar.form("alta"):
         conn = get_db_connection()
         c = conn.cursor()
         idx_base = MESES.index(mes_global)
+        
+        # Guardar registros
         for i in range(int(c_act), int(c_tot)+1):
             offset = i - int(c_act)
             mes_t = MESES[(idx_base + offset)%12]
@@ -187,8 +243,14 @@ with st.sidebar.form("alta"):
                 (fecha, mes, tipo, grupo, tipo_gasto, cuota, monto, moneda, forma_pago, fecha_pago) 
                 VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
                 (str(datetime.date.today()), mes_t, t_sel, g_sel, concepto, cuota, m_final, mon_sel, f_pago, fecha_v.strftime('%Y-%m-%d')))
-        conn.commit(); conn.close()
-        st.balloons(); st.success("Guardado"); st.rerun()
+        conn.commit()
+        conn.close()
+        
+        # --- ACTIVAR AUTOMATIZACIÓN DE SALDOS ---
+        # Se calcula desde el mes actual hacia adelante
+        actualizar_saldos_en_cascada(mes_global)
+        
+        st.balloons(); st.success("Guardado y Saldos Actualizados"); st.rerun()
 
 # --- TABS ---
 tab1, tab2, tab3, tab4 = st.tabs(["📊 DASHBOARD", "🔮 PREDICCIONES", "💬 CHAT IA", "⚙️ CONFIGURACIÓN"])
@@ -288,12 +350,21 @@ with tab1:
                 
                 b1, b2 = st.columns([1, 1])
                 conn = get_db_connection(); c = conn.cursor()
+                
+                # BOTONES DE ACCIÓN CON AUTOMATIZACIÓN
                 if b1.form_submit_button("💾 GUARDAR"):
                     m_f = procesar_monto_input(new_m)
                     c.execute("UPDATE movimientos SET tipo=%s, grupo=%s, tipo_gasto=%s, monto=%s, moneda=%s, cuota=%s, forma_pago=%s, fecha_pago=%s WHERE id=%s", (new_tipo, new_g, new_c, m_f, new_mon, new_cuota, new_pago, str(new_f), id_mov))
-                    conn.commit(); conn.close(); st.success("Editado"); st.rerun()
+                    conn.commit(); conn.close()
+                    # AUTOMATIZACIÓN
+                    actualizar_saldos_en_cascada(row_to_edit['mes']) 
+                    st.success("Editado y Recalculado"); st.rerun()
+                
                 if b2.form_submit_button("❌ ELIMINAR", type="primary"):
-                    c.execute("DELETE FROM movimientos WHERE id=%s", (id_mov,)); conn.commit(); conn.close(); st.warning("Eliminado"); st.rerun()
+                    c.execute("DELETE FROM movimientos WHERE id=%s", (id_mov,)); conn.commit(); conn.close()
+                    # AUTOMATIZACIÓN
+                    actualizar_saldos_en_cascada(row_to_edit['mes'])
+                    st.warning("Eliminado y Recalculado"); st.rerun()
     else: st.info("Sin datos.")
 
 with tab2: # PREDICCIONES
