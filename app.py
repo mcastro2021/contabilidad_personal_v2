@@ -2,14 +2,12 @@ import streamlit as st
 import pandas as pd
 import psycopg2
 import os
-import sqlite3
 import requests
 import datetime
 import plotly.express as px
 import plotly.graph_objects as go
 import hashlib
 from streamlit_lottie import st_lottie
-import tempfile
 from dotenv import load_dotenv
 import numpy as np
 from sklearn.linear_model import LinearRegression 
@@ -21,10 +19,30 @@ load_dotenv()
 # --- CONFIGURACIÓN ---
 st.set_page_config(page_title="SMART FINANCE PRO", layout="wide")
 
-# --- CONSTANTES ---
-MESES = ["Enero", "Febrero", "Marzo", "Abril", "Mayo", "Junio", 
-         "Julio", "Agosto", "Septiembre", "Octubre", "Noviembre", "Diciembre"]
+# --- GENERADOR DE MESES ---
+def generar_lista_meses(start_year=2026, end_year=2035):
+    meses_base = ["Enero", "Febrero", "Marzo", "Abril", "Mayo", "Junio", 
+                  "Julio", "Agosto", "Septiembre", "Octubre", "Noviembre", "Diciembre"]
+    lista = []
+    for anio in range(start_year, end_year + 1):
+        for mes in meses_base:
+            lista.append(f"{mes} {anio}")
+    return lista
+
+LISTA_MESES_LARGA = generar_lista_meses()
 OPCIONES_PAGO = ["Bancario", "Efectivo", "Transferencia", "Tarjeta de Debito", "Tarjeta de Credito"]
+
+# --- DATOS BASE PARA SALARIO CHICOS (SMVM) ---
+SMVM_BASE_2026 = {
+    "Enero 2026": 341000.0,
+    "Febrero 2026": 346800.0,
+    "Marzo 2026": 352400.0,
+    "Abril 2026": 357800.0,
+    "Mayo 2026": 363000.0,
+    "Junio 2026": 367800.0,
+    "Julio 2026": 372400.0,
+    "Agosto 2026": 376600.0
+}
 
 # --- FUNCIONES AUXILIARES ---
 def load_lottieurl(url):
@@ -35,8 +53,6 @@ def load_lottieurl(url):
     except: return None
 
 LOTTIE_FINANCE = "https://lottie.host/02a55953-2736-4763-b183-116515b81045/L1O1fW89yB.json" 
-LOTTIE_LOGIN = "https://lottie.host/93291880-990e-473d-82f5-b6574c831168/v2x2QkL6r4.json"
-LOTTIE_AI = "https://lottie.host/8078f4a1-0e77-49f3-8027-4638a1670985/9F7o7r2X0q.json"
 LOTTIE_CHAT = "https://lottie.host/3c6e93e4-8671-419b-b5e2-632009028f9d/p1A7v0gQ2z.json"
 
 def make_hashes(password):
@@ -97,60 +113,128 @@ def init_db():
 
 init_db()
 
-# --- AUTOMATIZACIÓN DE SALDOS (NUEVA LÓGICA) ---
-def actualizar_saldos_en_cascada(mes_modificado):
-    """
-    Recalcula el saldo del mes modificado y actualiza el 'Ahorro Mes Anterior'
-    del mes siguiente. Repite el proceso hasta Diciembre.
-    """
+# --- LÓGICA AUTOMÁTICA SALARIO CHICOS ---
+
+def calcular_monto_salario_mes(mes_str):
+    if mes_str in SMVM_BASE_2026:
+        base = SMVM_BASE_2026[mes_str]
+        monto = base * 2.5
+        if "Junio" in mes_str:
+            monto = monto + (monto / 2)
+        return monto
+    
+    if "2026" in mes_str:
+        meses_orden = ["Enero", "Febrero", "Marzo", "Abril", "Mayo", "Junio", "Julio", "Agosto", "Septiembre", "Octubre", "Noviembre", "Diciembre"]
+        try:
+            nombre_mes = mes_str.split(" ")[0]
+            if nombre_mes in ["Septiembre", "Octubre", "Noviembre", "Diciembre"]:
+                inicio = SMVM_BASE_2026["Enero 2026"]
+                fin = SMVM_BASE_2026["Agosto 2026"]
+                aumento_promedio = (fin - inicio) / 7
+                idx_agosto = meses_orden.index("Agosto")
+                idx_actual = meses_orden.index(nombre_mes)
+                meses_extra = idx_actual - idx_agosto
+                
+                base_proyectada = fin + (aumento_promedio * meses_extra)
+                monto_proyectado = base_proyectada * 2.5
+                
+                if nombre_mes == "Diciembre":
+                    monto_proyectado = monto_proyectado + (monto_proyectado / 2)
+                    
+                return monto_proyectado
+        except: return None
+    return None
+
+def ejecutar_actualizacion_automatica_salarios():
     try:
         conn = get_db_connection()
         c = conn.cursor()
-        
-        # Encontramos el índice numérico del mes donde ocurrió el cambio
-        idx_inicio = MESES.index(mes_modificado)
-        
-        # Iteramos desde el mes actual hasta Noviembre (para actualizar hasta Diciembre)
-        for i in range(idx_inicio, 11): # 0 a 10 (Enero a Noviembre)
-            mes_actual = MESES[i]
-            mes_siguiente = MESES[i+1]
-            
-            # 1. Calcular Saldo Real del Mes Actual (Ingresos - Gastos) en ARS
-            c.execute("""
-                SELECT 
-                    COALESCE(SUM(CASE WHEN tipo = 'GANANCIA' THEN monto ELSE 0 END), 0) -
-                    COALESCE(SUM(CASE WHEN tipo = 'GASTO' THEN monto ELSE 0 END), 0)
-                FROM movimientos 
-                WHERE mes = %s AND moneda = 'ARS'
-            """, (mes_actual,))
-            
-            saldo_actual = c.fetchone()[0] or 0.0
-            
-            # 2. Insertar o Actualizar ese saldo en el Mes Siguiente
-            # Buscamos si ya existe la fila 'Ahorro Mes Anterior' en el mes siguiente
-            c.execute("""SELECT id FROM movimientos 
-                         WHERE mes = %s AND tipo_gasto = 'Ahorro Mes Anterior'""", (mes_siguiente,))
-            row = c.fetchone()
-            
-            fecha_hoy = str(datetime.date.today())
-            
-            if row:
-                # Si existe, actualizamos el monto
-                c.execute("""UPDATE movimientos SET monto = %s WHERE id = %s""", (saldo_actual, row[0]))
-            else:
-                # Si no existe, lo creamos
-                c.execute("""INSERT INTO movimientos 
-                    (fecha, mes, tipo, grupo, tipo_gasto, cuota, monto, moneda, forma_pago, fecha_pago) 
-                    VALUES (%s, %s, 'GANANCIA', 'AHORRO MANUEL', 'Ahorro Mes Anterior', '1/1', %s, 'ARS', 'Automático', %s)""",
-                    (fecha_hoy, mes_siguiente, saldo_actual, fecha_hoy))
-            
-            # Al hacer commit aquí, el saldo del mes siguiente ya incluye el nuevo 'Ahorro Mes Anterior'
-            # para la siguiente iteración del bucle.
-            conn.commit()
-            
-        conn.close()
+        c.execute("SELECT id, mes FROM movimientos WHERE tipo_gasto = 'SALARIO CHICOS'")
+        registros = c.fetchall()
+        for reg in registros:
+            id_mov = reg[0]
+            mes_mov = reg[1]
+            valor_correcto = calcular_monto_salario_mes(mes_mov)
+            if valor_correcto is not None:
+                c.execute("UPDATE movimientos SET monto = %s WHERE id = %s", (valor_correcto, id_mov))
+        conn.commit(); conn.close()
     except Exception as e:
-        st.error(f"Error en la automatización de saldos: {e}")
+        print(f"Error auto-salarios: {e}")
+
+# --- LÓGICA AUTOMÁTICA TERRENO ---
+
+def ejecutar_actualizacion_automatica_terreno():
+    try:
+        base = 13800.0
+        tasa_mensual = 0.04
+        conn = get_db_connection()
+        c = conn.cursor()
+        for i, mes in enumerate(LISTA_MESES_LARGA):
+            monto_terreno = base * ((1 + tasa_mensual) ** i)
+            c.execute("""UPDATE movimientos SET monto = %s WHERE mes = %s AND tipo_gasto = 'TERRENO'""", (monto_terreno, mes))
+        conn.commit(); conn.close()
+    except Exception as e:
+        print(f"Error auto-terreno: {e}")
+
+# --- CASCADA DE CUOTAS ---
+
+def propagar_edicion_cuotas(mes_origen, concepto, grupo, monto, moneda, forma_pago, fecha_base, nueva_cuota_str):
+    try:
+        if "/" not in nueva_cuota_str: return
+        actual, total = map(int, nueva_cuota_str.split('/'))
+        if mes_origen not in LISTA_MESES_LARGA: return
+        idx_mes = LISTA_MESES_LARGA.index(mes_origen)
+        conn = get_db_connection()
+        c = conn.cursor()
+        cuota_num = actual + 1
+        
+        while cuota_num <= total:
+            idx_mes += 1
+            if idx_mes >= len(LISTA_MESES_LARGA): break
+            mes_futuro = LISTA_MESES_LARGA[idx_mes]
+            cuota_futura = f"{cuota_num}/{total}"
+            dias_offset = (cuota_num - actual) * 30
+            try:
+                fecha_base_dt = pd.to_datetime(fecha_base)
+                fecha_futura_dt = fecha_base_dt + datetime.timedelta(days=dias_offset)
+                # Mantener dia 1 si falla
+                try: fecha_futura_str = fecha_futura_dt.strftime('%Y-%m-%d')
+                except: fecha_futura_str = str(datetime.date.today())
+            except: fecha_futura_str = str(datetime.date.today())
+
+            c.execute("""UPDATE movimientos SET cuota = %s, monto = %s, moneda = %s, forma_pago = %s, fecha_pago = %s
+                WHERE mes = %s AND tipo_gasto = %s AND grupo = %s""", 
+                (cuota_futura, monto, moneda, forma_pago, fecha_futura_str, mes_futuro, concepto, grupo))
+            
+            if c.rowcount == 0:
+                c.execute("""INSERT INTO movimientos (fecha, mes, tipo, grupo, tipo_gasto, cuota, monto, moneda, forma_pago, fecha_pago)
+                    VALUES (%s, %s, 'GASTO', %s, %s, %s, %s, %s, %s, %s)""", 
+                    (str(datetime.date.today()), mes_futuro, grupo, concepto, cuota_futura, monto, moneda, forma_pago, fecha_futura_str))
+            
+            cuota_num += 1
+        conn.commit(); conn.close()
+    except Exception as e: print(f"Error cuotas: {e}")
+
+def actualizar_saldos_en_cascada(mes_modificado):
+    try:
+        conn = get_db_connection()
+        c = conn.cursor()
+        if mes_modificado not in LISTA_MESES_LARGA: return
+        idx_inicio = LISTA_MESES_LARGA.index(mes_modificado)
+        rango = min(len(LISTA_MESES_LARGA)-1, idx_inicio + 24)
+        for i in range(idx_inicio, rango):
+            mes_act = LISTA_MESES_LARGA[i]
+            mes_sig = LISTA_MESES_LARGA[i+1]
+            c.execute("""SELECT COALESCE(SUM(CASE WHEN tipo='GANANCIA' THEN monto ELSE 0 END),0) - COALESCE(SUM(CASE WHEN tipo='GASTO' THEN monto ELSE 0 END),0) FROM movimientos WHERE mes=%s AND moneda='ARS'""", (mes_act,))
+            saldo = c.fetchone()[0] or 0.0
+            c.execute("SELECT id FROM movimientos WHERE mes=%s AND tipo_gasto='Ahorro Mes Anterior'", (mes_sig,))
+            row = c.fetchone()
+            hoy = str(datetime.date.today())
+            if row: c.execute("UPDATE movimientos SET monto=%s WHERE id=%s", (saldo, row[0]))
+            else: c.execute("INSERT INTO movimientos (fecha, mes, tipo, grupo, tipo_gasto, cuota, monto, moneda, forma_pago, fecha_pago) VALUES (%s,%s,'GANANCIA','AHORRO MANUEL','Ahorro Mes Anterior','1/1',%s,'ARS','Automático',%s)", (hoy, mes_sig, saldo, hoy))
+            conn.commit()
+        conn.close()
+    except: pass
 
 @st.cache_data(ttl=60)
 def get_dolar():
@@ -167,7 +251,7 @@ if 'username' not in st.session_state:
 
 def login_page():
     st.markdown("<h1 style='text-align: center;'>🔐 ACCESO FINANZAS</h1>", unsafe_allow_html=True)
-    lottie_login = load_lottieurl(LOTTIE_LOGIN)
+    lottie_login = load_lottieurl(LOTTIE_FINANCE) 
     c1, c2, c3 = st.columns([1, 2, 1])
     with c2:
         if lottie_login: st_lottie(lottie_login, height=150, key="login_anim")
@@ -182,7 +266,7 @@ def login_page():
                     st.session_state['logged_in'] = True
                     st.session_state['username'] = u
                     st.rerun()
-                else: st.error("Credenciales incorrectas")
+                else: st.error("Error")
                 conn.close()
 
 if not st.session_state['logged_in']:
@@ -201,12 +285,15 @@ with st.sidebar:
     if st.button("Salir"):
         st.session_state['logged_in'] = False
         st.rerun()
-    st.divider()
 
 dolar_val, dolar_info = get_dolar()
 
 st.title("SMART FINANCE PRO")
-mes_global = st.selectbox("📅 MES DE TRABAJO:", MESES)
+mes_global = st.selectbox("📅 MES DE TRABAJO:", LISTA_MESES_LARGA)
+
+# --- EJECUCIÓN AUTOMÁTICA ---
+ejecutar_actualizacion_automatica_salarios()
+ejecutar_actualizacion_automatica_terreno()
 
 conn = get_db_connection()
 grupos_db = pd.read_sql("SELECT nombre FROM grupos ORDER BY nombre ASC", conn)['nombre'].tolist()
@@ -225,32 +312,37 @@ with st.sidebar.form("alta"):
     m_input = st.text_input("MONTO", "0,00")
     mon_sel = st.radio("MONEDA", ["ARS", "USD"], horizontal=True)
     f_pago = st.selectbox("PAGO", OPCIONES_PAGO)
-    f_fecha = st.date_input("FECHA PAGO", datetime.date.today())
+    f_fecha = st.date_input("FECHA PAGO", datetime.date(2026, 1, 1))
     
     if st.form_submit_button("GRABAR"):
         m_final = procesar_monto_input(m_input)
         conn = get_db_connection()
         c = conn.cursor()
-        idx_base = MESES.index(mes_global)
+        idx_base = LISTA_MESES_LARGA.index(mes_global)
+        cuota_actual = int(c_act)
+        total_cuotas = int(c_tot)
         
-        # Guardar registros
-        for i in range(int(c_act), int(c_tot)+1):
-            offset = i - int(c_act)
-            mes_t = MESES[(idx_base + offset)%12]
-            cuota = f"{i}/{int(c_tot)}"
-            fecha_v = f_fecha + pd.DateOffset(months=offset)
-            c.execute("""INSERT INTO movimientos 
-                (fecha, mes, tipo, grupo, tipo_gasto, cuota, monto, moneda, forma_pago, fecha_pago) 
-                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
-                (str(datetime.date.today()), mes_t, t_sel, g_sel, concepto, cuota, m_final, mon_sel, f_pago, fecha_v.strftime('%Y-%m-%d')))
-        conn.commit()
-        conn.close()
+        for i in range(cuota_actual, total_cuotas + 1):
+            offset = i - cuota_actual
+            if idx_base + offset < len(LISTA_MESES_LARGA):
+                mes_t = LISTA_MESES_LARGA[idx_base + offset]
+                
+                monto_guardar = m_final
+                val_calc = calcular_monto_salario_mes(mes_t)
+                if concepto.strip().upper() == "SALARIO CHICOS" and val_calc is not None:
+                    monto_guardar = val_calc
+
+                cuota_str = f"{i}/{total_cuotas}"
+                fecha_v = f_fecha + datetime.timedelta(days=30*offset)
+                
+                c.execute("""INSERT INTO movimientos 
+                    (fecha, mes, tipo, grupo, tipo_gasto, cuota, monto, moneda, forma_pago, fecha_pago) 
+                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
+                    (str(datetime.date.today()), mes_t, t_sel, g_sel, concepto, cuota_str, monto_guardar, mon_sel, f_pago, fecha_v.strftime('%Y-%m-%d')))
         
-        # --- ACTIVAR AUTOMATIZACIÓN DE SALDOS ---
-        # Se calcula desde el mes actual hacia adelante
+        conn.commit(); conn.close()
         actualizar_saldos_en_cascada(mes_global)
-        
-        st.balloons(); st.success("Guardado y Saldos Actualizados"); st.rerun()
+        st.balloons(); st.success("Guardado"); st.rerun()
 
 # --- TABS ---
 tab1, tab2, tab3, tab4 = st.tabs(["📊 DASHBOARD", "🔮 PREDICCIONES", "💬 CHAT IA", "⚙️ CONFIGURACIÓN"])
@@ -261,7 +353,7 @@ with tab1:
     df_mes = df_all[df_all['mes'] == mes_global].copy()
     
     if not df_mes.empty:
-        # KPI Calculation
+        # KPI
         i_ars = df_mes[(df_mes['moneda']=="ARS")&(df_mes['tipo']=="GANANCIA")]['monto'].sum()
         g_ars = df_mes[(df_mes['moneda']=="ARS")&(df_mes['tipo']=="GASTO")]['monto'].sum()
         i_usd = df_mes[(df_mes['moneda']=="USD")&(df_mes['tipo']=="GANANCIA")]['monto'].sum()
@@ -311,7 +403,7 @@ with tab1:
             "fecha_pago": st.column_config.DateColumn("FECHA PAGO", format="DD/MM/YYYY", width="medium"),
         }
 
-        row_to_edit = None 
+        selected_records = []
 
         for gran_tipo in ["GANANCIA", "GASTO"]:
             df_tipo = df_view[df_view['tipo'] == gran_tipo]
@@ -321,15 +413,41 @@ with tab1:
                 st.markdown(f"## {color} {plural}")
                 grupos_en_tipo = df_tipo['grupo'].unique()
                 grupos_en_tipo.sort()
+                
                 for grp in grupos_en_tipo:
                     with st.container():
                         st.subheader(f"📂 {grp}")
                         df_grp = df_tipo[df_tipo['grupo'] == grp]
-                        selection = st.dataframe(df_grp[cols_show], column_config=col_cfg, use_container_width=True, hide_index=True, on_select="rerun", selection_mode="single-row", key=f"tbl_{gran_tipo}_{grp}_{mes_global}")
-                        if selection.selection.rows: row_to_edit = df_grp.iloc[selection.selection.rows[0]]
+                        
+                        selection = st.dataframe(
+                            df_grp[cols_show], 
+                            column_config=col_cfg, 
+                            use_container_width=True, 
+                            hide_index=True, 
+                            on_select="rerun", 
+                            selection_mode="multi-row",
+                            key=f"tbl_{gran_tipo}_{grp}_{mes_global}"
+                        )
+                        
+                        subtotal_ars = df_grp.apply(
+                            lambda x: x['monto'] * dolar_val if x['moneda'] == 'USD' else x['monto'], 
+                            axis=1
+                        ).sum()
+                        
+                        st.markdown(f"""
+                        <div style="background-color: #262730; padding: 8px; border-radius: 5px; margin-bottom: 20px; text-align: left;">
+                            <strong>💰 Subtotal {grp}: {formato_moneda_visual(subtotal_ars, 'ARS')}</strong>
+                        </div>
+                        """, unsafe_allow_html=True)
+                        
+                        if selection.selection.rows:
+                            for idx in selection.selection.rows:
+                                selected_records.append(df_grp.iloc[idx])
                 st.divider()
 
-        if row_to_edit is not None:
+        # ACCIONES
+        if len(selected_records) == 1:
+            row_to_edit = selected_records[0]
             st.markdown(f"### ✏️ EDITANDO: {row_to_edit['tipo_gasto']}")
             with st.form("edit_form"):
                 id_mov = int(row_to_edit['id']) 
@@ -345,42 +463,76 @@ with tab1:
                 c_e7, c_e8 = st.columns(2)
                 new_pago = c_e7.selectbox("Forma Pago", OPCIONES_PAGO, index=OPCIONES_PAGO.index(row_to_edit['forma_pago']) if row_to_edit['forma_pago'] in OPCIONES_PAGO else 0)
                 try: f_dt = pd.to_datetime(row_to_edit['fecha_pago']).date()
-                except: f_dt = datetime.date.today()
+                except: f_dt = datetime.date(2026, 1, 1)
                 new_f = c_e8.date_input("Fecha Pago", value=f_dt)
                 
                 b1, b2 = st.columns([1, 1])
                 conn = get_db_connection(); c = conn.cursor()
                 
-                # BOTONES DE ACCIÓN CON AUTOMATIZACIÓN
                 if b1.form_submit_button("💾 GUARDAR"):
                     m_f = procesar_monto_input(new_m)
+                    
+                    val_calc = calcular_monto_salario_mes(row_to_edit['mes'])
+                    if new_c.strip().upper() == "SALARIO CHICOS" and val_calc is not None:
+                        m_f = val_calc
+                        st.toast(f"Valor corregido a Oficial: ${m_f:,.2f}")
+
                     c.execute("UPDATE movimientos SET tipo=%s, grupo=%s, tipo_gasto=%s, monto=%s, moneda=%s, cuota=%s, forma_pago=%s, fecha_pago=%s WHERE id=%s", (new_tipo, new_g, new_c, m_f, new_mon, new_cuota, new_pago, str(new_f), id_mov))
-                    conn.commit(); conn.close()
-                    # AUTOMATIZACIÓN
+                    conn.commit()
+                    
+                    if new_cuota != row_to_edit['cuota']:
+                        propagar_edicion_cuotas(mes_global, new_c, new_g, m_f, new_mon, new_pago, new_f, new_cuota)
+                    
+                    conn.close()
                     actualizar_saldos_en_cascada(row_to_edit['mes']) 
-                    st.success("Editado y Recalculado"); st.rerun()
+                    st.success("Editado"); st.rerun()
                 
                 if b2.form_submit_button("❌ ELIMINAR", type="primary"):
                     c.execute("DELETE FROM movimientos WHERE id=%s", (id_mov,)); conn.commit(); conn.close()
-                    # AUTOMATIZACIÓN
                     actualizar_saldos_en_cascada(row_to_edit['mes'])
-                    st.warning("Eliminado y Recalculado"); st.rerun()
+                    st.warning("Eliminado"); st.rerun()
+
+        elif len(selected_records) > 1:
+            st.markdown("---")
+            st.markdown("### 🛠️ EDICIÓN MASIVA")
+            st.warning(f"Seleccionados: {len(selected_records)}")
+            
+            c_mass_1, c_mass_2 = st.columns(2)
+            with c_mass_1:
+                new_mass_date = st.date_input("Nueva Fecha de Pago para selección", datetime.date.today())
+                if st.button("📅 ACTUALIZAR FECHAS"):
+                    conn = get_db_connection(); c = conn.cursor()
+                    ids_to_update = tuple([int(r['id']) for r in selected_records])
+                    c.execute("UPDATE movimientos SET fecha_pago = %s WHERE id IN %s", (str(new_mass_date), ids_to_update))
+                    conn.commit(); conn.close()
+                    st.success("Fechas actualizadas"); st.rerun()
+
+            with c_mass_2:
+                if st.button(f"❌ ELIMINAR SELECCIÓN", type="primary"):
+                    conn = get_db_connection(); c = conn.cursor()
+                    ids_to_delete = tuple([int(r['id']) for r in selected_records])
+                    c.execute("DELETE FROM movimientos WHERE id IN %s", (ids_to_delete,))
+                    conn.commit(); conn.close()
+                    actualizar_saldos_en_cascada(mes_global)
+                    st.success("Eliminados."); st.rerun()
     else: st.info("Sin datos.")
 
 with tab2: # PREDICCIONES
     c1, c2 = st.columns([1,3])
     with c1:
-        lottie_ai = load_lottieurl(LOTTIE_AI)
+        lottie_ai = load_lottieurl(LOTTIE_FINANCE)
         if lottie_ai: st_lottie(lottie_ai, height=150)
     with c2:
         st.header("🔮 Predicciones de Gasto")
-        st.caption("Análisis predictivo de tus gastos futuros basado en tu historial (Regresión Lineal).")
+        st.caption("Análisis predictivo 2026-2035")
 
     df_ai = df_all[df_all['tipo'] == 'GASTO'].copy()
     if len(df_ai) > 0:
         df_ai['monto_normalizado'] = df_ai.apply(lambda x: x['monto'] * dolar_val if x['moneda'] == 'USD' else x['monto'], axis=1)
-        mapa_meses = {m: i+1 for i, m in enumerate(MESES)}
+        mapa_meses = {m: i+1 for i, m in enumerate(LISTA_MESES_LARGA)}
         df_ai['mes_num'] = df_ai['mes'].map(mapa_meses)
+        df_ai = df_ai.dropna(subset=['mes_num']) 
+        
         df_monthly = df_ai.groupby('mes_num')['monto_normalizado'].sum().reset_index().sort_values('mes_num')
         
         if len(df_monthly) >= 2:
@@ -389,176 +541,94 @@ with tab2: # PREDICCIONES
             model = LinearRegression()
             model.fit(X, y)
             proximo_mes_num = df_monthly['mes_num'].max() + 1
-            if proximo_mes_num > 12: proximo_mes_num = 1
-            prediccion_futura = model.predict([[proximo_mes_num]])[0]
-            nombre_proximo_mes = MESES[proximo_mes_num - 1] if proximo_mes_num <= 12 else "Próximo Ciclo"
-            
-            col_kpi1, col_kpi2 = st.columns(2)
-            col_kpi1.metric(f"Gasto Estimado {nombre_proximo_mes}", formato_moneda_visual(prediccion_futura, "ARS"), 
-                            delta=f"{((prediccion_futura - y[-1])/y[-1])*100:.1f}% vs mes anterior", delta_color="inverse")
-            col_kpi2.info("El modelo analiza la tendencia de tus meses anteriores para proyectar el siguiente.")
-            
-            fig = go.Figure()
-            fig.add_trace(go.Scatter(x=[MESES[i-1] for i in df_monthly['mes_num']], y=df_monthly['monto_normalizado'], mode='lines+markers', name='Gasto Real', line=dict(color='#ff4b4b')))
-            y_pred = model.predict(X)
-            fig.add_trace(go.Scatter(x=[MESES[i-1] for i in df_monthly['mes_num']], y=y_pred, mode='lines', name='Tendencia IA', line=dict(dash='dot', color='gray')))
-            fig.add_trace(go.Scatter(x=[nombre_proximo_mes], y=[prediccion_futura], mode='markers', name='Predicción', marker=dict(size=12, color='#00cc96', symbol='star')))
-            fig.update_layout(title="Proyección de Gastos", template="plotly_white")
-            st.plotly_chart(fig, use_container_width=True)
-        else: st.warning("⚠️ Necesitas datos de al menos 2 meses distintos.")
-    else: st.info("Aún no tienes gastos registrados.")
+            if proximo_mes_num <= len(LISTA_MESES_LARGA):
+                prediccion_futura = model.predict([[proximo_mes_num]])[0]
+                nombre_proximo_mes = LISTA_MESES_LARGA[int(proximo_mes_num) - 1]
+                st.metric(f"Proyección {nombre_proximo_mes}", formato_moneda_visual(prediccion_futura, "ARS"))
+                
+                fig = go.Figure()
+                fig.add_trace(go.Scatter(x=[LISTA_MESES_LARGA[int(i)-1] for i in df_monthly['mes_num']], y=df_monthly['monto_normalizado'], mode='lines+markers', name='Real', line=dict(color='#ff4b4b')))
+                y_pred = model.predict(X)
+                fig.add_trace(go.Scatter(x=[LISTA_MESES_LARGA[int(i)-1] for i in df_monthly['mes_num']], y=y_pred, mode='lines', name='Tendencia', line=dict(dash='dot', color='gray')))
+                fig.update_layout(title="Proyección", template="plotly_white")
+                st.plotly_chart(fig, use_container_width=True)
+            else: st.info("Fin del calendario.")
+        else: st.warning("Faltan datos para predecir.")
+    else: st.info("Sin gastos registrados.")
 
-with tab3: # 💬 CHAT IA (SOLUCIÓN NATIVA)
+with tab3: # CHAT IA
     c1, c2 = st.columns([1,3])
     with c1:
         lottie_chat = load_lottieurl(LOTTIE_CHAT)
         if lottie_chat: st_lottie(lottie_chat, height=120)
     with c2:
-        st.header("💬 Chat con tus Finanzas")
-        st.caption("Pregunta lo que quieras sobre tus datos (Ej: '¿Cuánto gasté en Supermercado?').")
-
+        st.header("💬 Chat Financiero")
     api_key = os.environ.get("OPENAI_API_KEY")
-    if not api_key: api_key = st.text_input("Ingresa tu API Key de OpenAI:", type="password")
+    if not api_key: api_key = st.text_input("OpenAI API Key:", type="password")
     
     if api_key:
-        query = st.text_area("✍️ Escribe tu pregunta:")
-        if st.button("🤖 Consultar"):
-            if query and not df_all.empty:
-                with st.spinner("Analizando..."):
-                    try:
-                        # PREPARAR CONTEXTO PARA LA IA
-                        df_sample = df_all.head(3).to_markdown()
-                        columnas = list(df_all.columns)
-                        
-                        prompt = f"""
-                        Eres un analista de datos experto en Python. Tienes un DataFrame de pandas llamado 'df'.
-                        Columnas: {columnas}
-                        Muestra de datos:
-                        {df_sample}
+        query = st.text_area("Pregunta:")
+        if st.button("🤖 Consultar") and query:
+            with st.spinner("Analizando..."):
+                try:
+                    df_sample = df_all.head(3).to_markdown()
+                    columnas = list(df_all.columns)
+                    prompt = f"Data: {df_sample}. Query: {query}. Respond ONLY python code."
+                    client = OpenAI(api_key=api_key)
+                    response = client.chat.completions.create(model="gpt-4o-mini", messages=[{"role": "user", "content": prompt}])
+                    codigo = response.choices[0].message.content.replace("```python", "").replace("```", "").strip()
+                    local_vars = {"df": df_all, "px": px, "pd": pd}
+                    exec(codigo, globals(), local_vars)
+                    if "resultado" in local_vars: st.success(local_vars["resultado"])
+                    if "fig" in local_vars: st.plotly_chart(local_vars["fig"])
+                except Exception as e: st.error(str(e))
 
-                        El usuario pregunta: "{query}"
-
-                        Tu tarea:
-                        1. Escribe código Python para responder la pregunta usando el dataframe 'df'.
-                        2. Si la respuesta es un número o texto, guárdalo en una variable llamada 'resultado'.
-                        3. Si piden un gráfico, usa plotly.express y guarda la figura en una variable llamada 'fig'.
-                        4. NO expliques nada, SOLO devuelve el bloque de código.
-                        5. Asegúrate de manejar errores (ej: columnas que no existen).
-                        """
-
-                        client = OpenAI(api_key=api_key)
-                        response = client.chat.completions.create(
-                            model="gpt-4o-mini",
-                            messages=[{"role": "system", "content": "Eres un asistente de código Python."},
-                                      {"role": "user", "content": prompt}]
-                        )
-                        
-                        codigo_generado = response.choices[0].message.content.replace("```python", "").replace("```", "").strip()
-                        
-                        # EJECUCIÓN SEGURA (SANDBOX LIMITADO)
-                        local_vars = {"df": df_all, "px": px, "pd": pd}
-                        exec(codigo_generado, globals(), local_vars)
-                        
-                        if "resultado" in local_vars:
-                            st.success("Respuesta:")
-                            st.write(local_vars["resultado"])
-                        
-                        if "fig" in local_vars:
-                            st.plotly_chart(local_vars["fig"], use_container_width=True)
-                            
-                        with st.expander("Ver código generado"):
-                            st.code(codigo_generado)
-
-                    except Exception as e:
-                        st.error(f"Error al procesar: {e}")
-            else:
-                st.warning("Escribe algo o asegúrate de tener datos cargados.")
-    else:
-        st.warning("Necesitas una API Key para usar el chat.")
-
-with tab4: # CONFIGURACION
+with tab4: # CONFIG
     st.header("⚙️ Configuración")
     
-    st.markdown("### 📤 MIGRACIÓN DE DATOS")
-    archivo_db = st.file_uploader("Sube tu archivo .db", type=["db", "sqlite", "sqlite3"])
-    if archivo_db and st.button("🔄 INICIAR MIGRACIÓN"):
-        try:
-            with tempfile.NamedTemporaryFile(delete=False) as tmp_file:
-                tmp_file.write(archivo_db.getvalue()); tmp_path = tmp_file.name
-            conn_old = sqlite3.connect(tmp_path)
-            df_old = pd.read_sql("SELECT * FROM movimientos", conn_old)
-            conn_old.close()
-            conn_new = get_db_connection(); c_new = conn_new.cursor()
-            count = 0
-            for _, row in df_old.iterrows():
-                c_new.execute("INSERT INTO movimientos (fecha, mes, tipo, grupo, tipo_gasto, cuota, monto, moneda, forma_pago, fecha_pago) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
-                    (row['fecha'], row['mes'], row['tipo'], row['grupo'], row['tipo_gasto'], row['cuota'], row['monto'], row['moneda'], row['forma_pago'], row['fecha_pago']))
-                count += 1
-            conn_new.commit(); conn_new.close()
-            st.success(f"✅ Migrados {count} registros.")
-        except Exception as e: st.error(f"Error: {e}")
+    st.markdown("### 📤 MIGRACIÓN")
+    archivo_db = st.file_uploader("Archivo .db", type=["db", "sqlite", "sqlite3"])
+    if archivo_db and st.button("🔄 MIGRAR"):
+        with tempfile.NamedTemporaryFile(delete=False) as tmp: tmp.write(archivo_db.getvalue()); path=tmp.name
+        conn_old = sqlite3.connect(path); df_old = pd.read_sql("SELECT * FROM movimientos", conn_old); conn_old.close()
+        conn_new = get_db_connection(); c = conn_new.cursor()
+        for _, r in df_old.iterrows():
+            c.execute("INSERT INTO movimientos (fecha, mes, tipo, grupo, tipo_gasto, cuota, monto, moneda, forma_pago, fecha_pago) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)", 
+                      (r['fecha'], r['mes'], r['tipo'], r['grupo'], r['tipo_gasto'], r['cuota'], r['monto'], r['moneda'], r['forma_pago'], r['fecha_pago']))
+        conn_new.commit(); conn_new.close(); st.success("Migrado.")
 
     st.divider()
-    # ZONA PELIGRO
-    with st.expander("💀 ZONA DE PELIGRO (BORRAR TODO)"):
-        st.warning("⚠️ ESTA ACCIÓN NO SE PUEDE DESHACER.")
-        confirm_text = st.text_input("Escribe 'ELIMINAR' para confirmar:")
-        if st.button("💣 BORRAR BASE DE DATOS COMPLETA", type="primary"):
-            if confirm_text == "ELIMINAR":
+    with st.expander("💀 ZONA DE PELIGRO"):
+        if st.button("💣 RESET TOTAL", type="primary"):
+            if st.text_input("Confirmar escribiendo ELIMINAR") == "ELIMINAR":
                 conn = get_db_connection(); c = conn.cursor()
                 c.execute("TRUNCATE TABLE movimientos, grupos, users RESTART IDENTITY CASCADE;")
                 conn.commit(); conn.close(); init_db()
-                st.success("Reiniciado."); st.session_state['logged_in'] = False; st.rerun()
-            else: st.error("Texto incorrecto.")
+                st.rerun()
 
     st.divider()
-    with st.expander("🏷️ GESTIONAR GRUPOS"):
+    with st.expander("🏷️ GRUPOS"):
         c1, c2 = st.columns(2)
         conn = get_db_connection(); c = conn.cursor()
         with c1:
-            n_g = st.text_input("Nuevo Grupo").upper()
-            if st.button("Crear Grupo"): c.execute("INSERT INTO grupos VALUES (%s) ON CONFLICT DO NOTHING", (n_g,)); conn.commit(); st.rerun()
+            if st.button("Crear"): c.execute("INSERT INTO grupos VALUES (%s) ON CONFLICT DO NOTHING", (st.text_input("Nuevo").upper(),)); conn.commit(); st.rerun()
         with c2:
-            d_g = st.selectbox("Eliminar Grupo", grupos_db)
-            if st.button("Eliminar"): c.execute("DELETE FROM grupos WHERE nombre=%s", (d_g,)); conn.commit(); st.rerun()
+            d_g = st.selectbox("Borrar", grupos_db)
+            if st.button("Eliminar Grupo"): c.execute("DELETE FROM grupos WHERE nombre=%s", (d_g,)); conn.commit(); st.rerun()
         conn.close()
 
-    with st.expander("🔐 USUARIOS"):
-        u_new = st.text_input("Nuevo Usuario")
-        p_new = st.text_input("Nueva Contraseña", type="password")
-        if st.button("Crear Usuario"):
-            conn = get_db_connection(); c = conn.cursor()
-            try: c.execute("INSERT INTO users VALUES (%s, %s) ON CONFLICT DO NOTHING", (u_new, make_hashes(p_new))); conn.commit(); st.success("Creado")
-            except: st.error("Error al crear")
-            finally: conn.close()
-
-    with st.expander("🔑 CAMBIAR MI CONTRASEÑA"):
-        curr = st.text_input("Actual", type="password")
-        n1 = st.text_input("Nueva", type="password")
-        n2 = st.text_input("Repetir", type="password")
-        if st.button("Cambiar"):
-            conn = get_db_connection(); c = conn.cursor()
-            user = st.session_state['username']
-            c.execute("SELECT * FROM users WHERE username=%s AND password=%s", (user, make_hashes(curr)))
-            if c.fetchone():
-                if n1 == n2: c.execute("UPDATE users SET password=%s WHERE username=%s", (make_hashes(n1), user)); conn.commit(); st.success("Cambiada!"); st.session_state['logged_in']=False; st.rerun()
-                else: st.error("No coinciden")
-            else: st.error("Incorrecta")
-            conn.close()
-    
     st.divider()
     c1, c2, c3 = st.columns(3)
-    m_src = c1.selectbox("Desde", MESES)
-    m_dst = c2.selectbox("Hasta", ["TODO EL AÑO"]+MESES)
+    m_src = c1.selectbox("Desde", LISTA_MESES_LARGA)
+    m_dst = c2.selectbox("Hasta", ["TODO EL AÑO"]+LISTA_MESES_LARGA)
     if c3.button("🚀 CLONAR"):
         conn = get_db_connection(); c = conn.cursor()
         src = pd.read_sql(f"SELECT * FROM movimientos WHERE mes='{m_src}'", conn)
-        if not src.empty:
-            targets = MESES if m_dst == "TODO EL AÑO" else [m_dst]
-            for t in targets:
-                if t == m_src: continue
-                c.execute("DELETE FROM movimientos WHERE mes=%s", (t,))
-                for _, r in src.iterrows():
-                    c.execute("INSERT INTO movimientos (fecha, mes, tipo, grupo, tipo_gasto, cuota, monto, moneda, forma_pago, fecha_pago) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)", (str(datetime.date.today()), t, r['tipo'], r['grupo'], r['tipo_gasto'], r['cuota'], r['monto'], r['moneda'], r['forma_pago'], r['fecha_pago']))
-            conn.commit(); st.success("Clonado!"); st.rerun()
-        conn.close()
+        targets = [m for m in LISTA_MESES_LARGA if m.split(' ')[1] == m_src.split(' ')[1]] if m_dst == "TODO EL AÑO" else [m_dst]
+        for t in targets:
+            if t == m_src: continue
+            c.execute("DELETE FROM movimientos WHERE mes=%s", (t,))
+            for _, r in src.iterrows():
+                c.execute("INSERT INTO movimientos (fecha, mes, tipo, grupo, tipo_gasto, cuota, monto, moneda, forma_pago, fecha_pago) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)", 
+                          (str(datetime.date.today()), t, r['tipo'], r['grupo'], r['tipo_gasto'], r['cuota'], r['monto'], r['moneda'], r['forma_pago'], r['fecha_pago']))
+        conn.commit(); st.success("Clonado."); st.rerun()

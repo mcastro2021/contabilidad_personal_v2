@@ -10,3 +10,4 @@ numpy
 openai
 matplotlib
 tabulate
+beautifulsoup4
