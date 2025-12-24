@@ -93,23 +93,16 @@ def get_db_connection():
 def init_db():
     conn = get_db_connection()
     c = conn.cursor()
-    # Tabla Movimientos
     c.execute('''CREATE TABLE IF NOT EXISTS movimientos 
                  (id SERIAL PRIMARY KEY, fecha TEXT, mes TEXT, 
                   tipo TEXT, grupo TEXT, tipo_gasto TEXT, cuota TEXT, monto REAL, moneda TEXT,
                   forma_pago TEXT, fecha_pago TEXT)''')
-    # Tabla Grupos
     c.execute('''CREATE TABLE IF NOT EXISTS grupos (nombre TEXT PRIMARY KEY)''')
-    # Tabla Usuarios
     c.execute('''CREATE TABLE IF NOT EXISTS users (username TEXT PRIMARY KEY, password TEXT)''')
-    
-    # --- NUEVA TABLA: DEUDAS ---
-    c.execute('''CREATE TABLE IF NOT EXISTS deudas 
-                 (id SERIAL PRIMARY KEY, nombre_deuda TEXT, monto_total REAL, moneda TEXT, fecha_inicio TEXT, estado TEXT)''')
     
     c.execute("SELECT count(*) FROM grupos")
     if c.fetchone()[0] == 0:
-        c.executemany("INSERT INTO grupos VALUES (%s) ON CONFLICT DO NOTHING", [("AHORRO MANUEL",), ("CASA",), ("AUTO",), ("VARIOS",), ("DEUDAS",)])
+        c.executemany("INSERT INTO grupos VALUES (%s) ON CONFLICT DO NOTHING", [("AHORRO MANUEL",), ("CASA",), ("AUTO",), ("VARIOS",)])
     
     c.execute("SELECT count(*) FROM users")
     if c.fetchone()[0] == 0:
@@ -242,12 +235,22 @@ def actualizar_saldos_en_cascada(mes_modificado):
         conn.close()
     except: pass
 
+# --- DOLAR API (MODIFICADO) ---
 @st.cache_data(ttl=60)
 def get_dolar():
     try:
         r = requests.get("https://dolarapi.com/v1/dolares/blue", timeout=3).json()
-        return (float(r['compra']) + float(r['venta'])) / 2, f"(Venta: ${int(r['venta'])})"
-    except: return 1480.0, "(Ref)"
+        compra = float(r['compra'])
+        venta = float(r['venta'])
+        promedio = (compra + venta) / 2
+        
+        # Función para formato local (1.485,00)
+        def f(v): return f"{v:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
+        
+        texto = f"💲 Dolar Blue: (Compra: {f(compra)}) (Venta: {f(venta)}) (Promedio: {f(promedio)})"
+        return promedio, texto
+    except: 
+        return 1495.0, "💲 Dolar Blue: (Sin Conexión)"
 
 # --- LOGIN ---
 if 'logged_in' not in st.session_state:
@@ -365,11 +368,10 @@ with st.sidebar.form("alta"):
         st.balloons(); st.success("Guardado"); st.rerun()
 
 # --- TABS ---
-# AÑADIDA TAB 5: DEUDAS
-tab1, tab2, tab3, tab4, tab5 = st.tabs(["📊 DASHBOARD", "🔮 PREDICCIONES", "💬 CHAT IA", "⚙️ CONFIGURACIÓN", "📉 DEUDAS / PAGOS PARCIALES"])
+tab1, tab2, tab3, tab4 = st.tabs(["📊 DASHBOARD", "🔮 PREDICCIONES", "💬 CHAT IA", "⚙️ CONFIGURACIÓN"])
 
 with tab1:
-    st.info(f"Dolar Blue: {formato_moneda_visual(dolar_val, 'ARS')} {dolar_info}")
+    st.info(dolar_info)
     
     df_mes = df_all[df_all['mes'] == mes_global].copy()
     
@@ -618,15 +620,6 @@ with tab3: # CHAT IA
 with tab4: # CONFIG
     st.header("⚙️ Configuración")
     
-    with st.expander("📅 ALINEAR FECHAS CON EL MES"):
-        st.info("Corrige fechas de pago desfasadas.")
-        if st.button("CORREGIR FECHAS"):
-            count = alinear_fechas_pago_masivo()
-            st.success(f"Se corrigieron {count} registros.")
-            st.rerun()
-
-    st.divider()
-    
     st.markdown("### 📤 MIGRACIÓN")
     archivo_db = st.file_uploader("Archivo .db", type=["db", "sqlite", "sqlite3"])
     if archivo_db and st.button("🔄 MIGRAR"):
@@ -664,79 +657,3 @@ with tab4: # CONFIG
                 c.execute("INSERT INTO movimientos (fecha, mes, tipo, grupo, tipo_gasto, cuota, monto, moneda, forma_pago, fecha_pago) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)", 
                           (str(datetime.date.today()), t, r['tipo'], r['grupo'], r['tipo_gasto'], r['cuota'], r['monto'], r['moneda'], r['forma_pago'], r['fecha_pago']))
         conn.commit(); st.success("Clonado."); st.rerun()
-
-# --- NUEVA PESTAÑA: DEUDAS Y PAGOS PARCIALES ---
-with tab5:
-    st.header("📉 Gestión de Deudas y Pagos Parciales")
-    st.caption("Registra aquí tus deudas totales y ve pagando de a poco. Estos pagos aparecerán en tu flujo de caja mensual.")
-
-    c_deuda1, c_deuda2 = st.columns([1, 2])
-    
-    conn = get_db_connection(); c = conn.cursor()
-    
-    with c_deuda1:
-        st.subheader("➕ Nueva Deuda")
-        with st.form("nueva_deuda"):
-            n_deuda = st.text_input("Nombre de la Deuda (Ej: Préstamo Juan)")
-            m_deuda = st.text_input("Monto Total a Deber", "0,00")
-            mon_deuda = st.selectbox("Moneda", ["ARS", "USD"])
-            if st.form_submit_button("Crear Deuda"):
-                monto_real = procesar_monto_input(m_deuda)
-                c.execute("INSERT INTO deudas (nombre_deuda, monto_total, moneda, fecha_inicio, estado) VALUES (%s, %s, %s, %s, 'ACTIVA')", 
-                          (n_deuda, monto_real, mon_deuda, str(datetime.date.today())))
-                conn.commit(); st.success("Deuda Creada"); st.rerun()
-
-    with c_deuda2:
-        st.subheader("📋 Mis Deudas")
-        deudas_df = pd.read_sql("SELECT * FROM deudas WHERE estado='ACTIVA'", conn)
-        
-        if not deudas_df.empty:
-            for _, deuda in deudas_df.iterrows():
-                with st.expander(f"{deuda['nombre_deuda']} ({formato_moneda_visual(deuda['monto_total'], deuda['moneda'])})"):
-                    # Calcular pagado hasta ahora buscando en MOVIMIENTOS
-                    # Buscamos movimientos donde grupo='DEUDAS' y el concepto contenga el nombre de la deuda
-                    # Esto vincula ambas tablas
-                    c.execute("""
-                        SELECT SUM(monto) FROM movimientos 
-                        WHERE grupo='DEUDAS' AND tipo_gasto LIKE %s AND moneda=%s
-                    """, (f"%{deuda['nombre_deuda']}%", deuda['moneda']))
-                    
-                    pagado = c.fetchone()[0] or 0.0
-                    restante = deuda['monto_total'] - pagado
-                    progreso = min(pagado / deuda['monto_total'], 1.0) if deuda['monto_total'] > 0 else 0
-                    
-                    st.progress(progreso)
-                    c1, c2, c3 = st.columns(3)
-                    c1.metric("Total", formato_moneda_visual(deuda['monto_total'], deuda['moneda']))
-                    c2.metric("Pagado", formato_moneda_visual(pagado, deuda['moneda']))
-                    c3.metric("Falta", formato_moneda_visual(restante, deuda['moneda']))
-                    
-                    if restante <= 0:
-                        st.success("¡DEUDA PAGADA!")
-                        if st.button("Archivar Deuda", key=f"arch_{deuda['id']}"):
-                            c.execute("UPDATE deudas SET estado='PAGADA' WHERE id=%s", (deuda['id'],)); conn.commit(); st.rerun()
-                    else:
-                        st.markdown("---")
-                        st.write("**Registrar un pago parcial:**")
-                        c_pago1, c_pago2 = st.columns(2)
-                        monto_pago = c_pago1.text_input("Monto a Pagar", key=f"mp_{deuda['id']}")
-                        forma_pago_d = c_pago2.selectbox("Forma de Pago", OPCIONES_PAGO, key=f"fp_{deuda['id']}")
-                        
-                        if st.button("💸 Registrar Pago", key=f"btn_{deuda['id']}"):
-                            m_pago_real = procesar_monto_input(monto_pago)
-                            if m_pago_real > 0:
-                                # Insertamos en la tabla principal para que afecte el flujo de caja
-                                concepto_pago = f"Pago parcial: {deuda['nombre_deuda']}"
-                                c.execute("""INSERT INTO movimientos 
-                                    (fecha, mes, tipo, grupo, tipo_gasto, cuota, monto, moneda, forma_pago, fecha_pago) 
-                                    VALUES (%s, %s, 'GASTO', 'DEUDAS', %s, '', %s, %s, %s, %s)""",
-                                    (str(datetime.date.today()), mes_global, concepto_pago, m_pago_real, deuda['moneda'], forma_pago_d, str(datetime.date.today())))
-                                conn.commit()
-                                actualizar_saldos_en_cascada(mes_global)
-                                st.balloons()
-                                st.success("Pago registrado correctamente")
-                                st.rerun()
-        else:
-            st.info("No tienes deudas activas.")
-            
-    conn.close()
