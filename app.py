@@ -102,7 +102,7 @@ def init_db():
         c.execute("ALTER TABLE movimientos ADD COLUMN pagado BOOLEAN DEFAULT FALSE")
         conn.commit()
     except:
-        conn.rollback() # Ya existe la columna
+        conn.rollback() 
 
     # Tabla Grupos
     c.execute('''CREATE TABLE IF NOT EXISTS grupos (nombre TEXT PRIMARY KEY)''')
@@ -325,7 +325,7 @@ with st.sidebar.form("alta"):
     f_pago = st.selectbox("PAGO", OPCIONES_PAGO)
     f_fecha = st.date_input("FECHA PAGO", datetime.date(2026, 1, 1))
     
-    # Campo extra al crear: ¿Ya está pagado?
+    # Campo extra al crear
     ya_pagado = st.checkbox("¿Ya está pagado/confirmado?")
     
     if st.form_submit_button("GRABAR"):
@@ -363,7 +363,6 @@ with st.sidebar.form("alta"):
                     cuota_str = f"{i}/{total_cuotas}"
                     fecha_v = f_fecha + datetime.timedelta(days=30*offset)
                     
-                    # Para cuotas futuras, asumimos NO pagado (False) a menos que sea el mes actual y se haya marcado
                     es_pagado_cuota = ya_pagado if offset == 0 else False
                     
                     c.execute("""INSERT INTO movimientos 
@@ -422,20 +421,17 @@ with tab1:
 
         st.markdown("---") 
         
-        # TABLAS JERARQUICAS CON ESTILO CONDICIONAL
+        # TABLAS JERARQUICAS CON ESTILO
         df_view = df_mes.copy()
         df_view['monto_visual'] = df_view.apply(lambda x: formato_moneda_visual(x['monto'], x['moneda']), axis=1)
         
-        # Asegurar columna pagado
-        if 'pagado' not in df_view.columns:
-            df_view['pagado'] = False
-        else:
-            df_view['pagado'] = df_view['pagado'].fillna(False).astype(bool)
-
-        # Crear columna de estado visual
+        if 'pagado' not in df_view.columns: df_view['pagado'] = False
+        df_view['pagado'] = df_view['pagado'].fillna(False).astype(bool)
         df_view['estado'] = df_view['pagado'].apply(lambda x: "✅" if x else "⏳")
 
-        cols_show = ["estado", "tipo_gasto", "monto_visual", "cuota", "forma_pago", "fecha_pago"]
+        # AGREGAMOS 'pagado' PARA QUE EL STYLER LO LEA
+        cols_show = ["estado", "tipo_gasto", "monto_visual", "cuota", "forma_pago", "fecha_pago", "pagado"]
+        
         col_cfg = {
             "estado": st.column_config.TextColumn("EST", width="small"),
             "tipo_gasto": st.column_config.TextColumn("CONCEPTO"),
@@ -443,9 +439,9 @@ with tab1:
             "cuota": st.column_config.TextColumn("CUOTA", width="small"),
             "forma_pago": st.column_config.TextColumn("FORMA PAGO", width="medium"),
             "fecha_pago": st.column_config.DateColumn("FECHA PAGO", format="DD/MM/YYYY", width="medium"),
+            "pagado": st.column_config.Column("Pagado", hidden=True), # OCULTO
         }
 
-        # Función para pintar filas pagadas
         def estilo_pagados(row):
             color = 'background-color: #1c3323' if row['pagado'] else ''
             return [color] * len(row)
@@ -466,11 +462,11 @@ with tab1:
                         st.subheader(f"📂 {grp}")
                         df_grp = df_tipo[df_tipo['grupo'] == grp]
                         
-                        # Aplicar estilo
+                        # Fix: usar cols_show
                         styled_df = df_grp[cols_show].style.apply(estilo_pagados, axis=1)
                         
                         selection = st.dataframe(
-                            styled_df, # Usamos el DF estilizado
+                            styled_df,
                             column_config=col_cfg, 
                             use_container_width=True, 
                             hide_index=True, 
@@ -516,8 +512,7 @@ with tab1:
                 except: f_dt = datetime.date(2026, 1, 1)
                 new_f = c_e8.date_input("Fecha Pago", value=f_dt)
                 
-                # Checkbox de Pagado
-                val_pagado = bool(row_to_edit['pagado']) if 'pagado' in row_to_edit else False
+                val_pagado = bool(row_to_edit['pagado'])
                 new_pagado = c_e9.checkbox("✅ MARCAR COMO PAGADO", value=val_pagado)
                 
                 b1, b2 = st.columns([1, 1])
@@ -555,7 +550,6 @@ with tab1:
             with c_mass_2:
                 new_mass_payment = st.selectbox("Nueva Forma de Pago", OPCIONES_PAGO)
             with c_mass_3:
-                # Masivo marcar como pagado
                 mark_paid = st.checkbox("✅ Marcar TODOS como pagados")
             with c_mass_4:
                 st.write("") 
@@ -563,14 +557,10 @@ with tab1:
                 if st.button("💾 ACTUALIZAR TODO"):
                     conn = get_db_connection(); c = conn.cursor()
                     ids_to_update = tuple([int(r['id']) for r in selected_records])
-                    
-                    # Si marca el check, actualiza pagado=True, si no, mantiene el valor original (no lo desmarca masivamente por seguridad, o si?)
-                    # Mejor logica: Solo si marca el check, lo pone en True.
                     if mark_paid:
                         c.execute("UPDATE movimientos SET fecha_pago = %s, forma_pago = %s, pagado = TRUE WHERE id IN %s", (str(new_mass_date), new_mass_payment, ids_to_update))
                     else:
                         c.execute("UPDATE movimientos SET fecha_pago = %s, forma_pago = %s WHERE id IN %s", (str(new_mass_date), new_mass_payment, ids_to_update))
-                        
                     conn.commit(); conn.close()
                     st.success("Registros actualizados"); st.rerun()
             
@@ -684,14 +674,12 @@ with tab4:
 
     with c_deuda2:
         st.subheader("📋 Mis Deudas Activas")
-        # Mostrar solo deudas activas para no llenar la pantalla
         deudas_df = pd.read_sql("SELECT * FROM deudas WHERE estado='ACTIVA'", conn)
         
         if not deudas_df.empty:
             for _, deuda in deudas_df.iterrows():
                 with st.expander(f"{deuda['nombre_deuda']} ({formato_moneda_visual(deuda['monto_total'], deuda['moneda'])})", expanded=True):
-                    # Calcular pagado hasta ahora buscando en MOVIMIENTOS
-                    # Vinculamos por nombre en el concepto. Es un método simple y efectivo.
+                    # Calcular pagado
                     c.execute("""
                         SELECT id, fecha_pago, monto FROM movimientos 
                         WHERE grupo='DEUDAS' AND tipo_gasto LIKE %s AND moneda=%s
@@ -708,7 +696,7 @@ with tab4:
                     c2.metric("Pagado", formato_moneda_visual(total_pagado, deuda['moneda']))
                     c3.metric("Falta", formato_moneda_visual(restante, deuda['moneda']))
                     
-                    # --- HISTORIAL DE PAGOS CON BORRADO INDIVIDUAL ---
+                    # HISTORIAL DE PAGOS
                     if pagos_realizados:
                         st.markdown("###### 📜 Historial de Pagos")
                         for p in pagos_realizados:
@@ -722,7 +710,6 @@ with tab4:
                                 st.rerun()
                         st.markdown("---")
 
-                    # --- ACCIONES PRINCIPALES ---
                     if restante <= 0:
                         st.success("¡DEUDA PAGADA!")
                         if st.button("Archivar como Pagada", key=f"arch_{deuda['id']}"):
@@ -736,7 +723,6 @@ with tab4:
                         if st.button("💸 Registrar Pago", key=f"btn_{deuda['id']}"):
                             m_pago_real = procesar_monto_input(monto_pago)
                             if m_pago_real > 0:
-                                # Insertamos en la tabla principal para que afecte el flujo de caja
                                 concepto_pago = f"Pago parcial: {deuda['nombre_deuda']}"
                                 c.execute("""INSERT INTO movimientos 
                                     (fecha, mes, tipo, grupo, tipo_gasto, cuota, monto, moneda, forma_pago, fecha_pago, pagado) 
@@ -749,7 +735,6 @@ with tab4:
                                 st.rerun()
                     
                     st.markdown("---")
-                    # BOTÓN DE ELIMINAR DEUDA COMPLETA (ROJO)
                     if st.button("❌ ELIMINAR DEUDA", key=f"del_debt_{deuda['id']}", type="primary"):
                         c.execute("DELETE FROM deudas WHERE id=%s", (deuda['id'],))
                         conn.commit()
