@@ -325,7 +325,7 @@ with st.sidebar.form("alta"):
     f_pago = st.selectbox("PAGO", OPCIONES_PAGO)
     f_fecha = st.date_input("FECHA PAGO", datetime.date(2026, 1, 1))
     
-    ya_pagado = st.checkbox("¿Ya está pagado/confirmado?")
+    ya_pagado = st.checkbox("¿YA ESTÁ PAGADO?")
     
     if st.form_submit_button("GRABAR"):
         m_final = procesar_monto_input(m_input)
@@ -402,11 +402,18 @@ with tab1:
         df_mes_graf = df_mes.copy()
         df_mes_graf['m_ars_v'] = df_mes_graf.apply(lambda x: x['monto'] * dolar_val if x['moneda'] == 'USD' else x['monto'], axis=1)
         
-        col_pie, col_ars, col_usd = st.columns(3)
-        with col_pie:
+        c_graf_1, c_graf_2 = st.columns(2)
+        with c_graf_1:
             st.caption("Distribución de Gastos")
             if not df_mes_graf[df_mes_graf['tipo']=="GASTO"].empty:
                 st.plotly_chart(px.pie(df_mes_graf[df_mes_graf['tipo']=="GASTO"], values='m_ars_v', names='grupo', hole=0.4), use_container_width=True)
+        with c_graf_2:
+            st.caption("Gastos por Forma de Pago")
+            df_fp = df_mes_graf[df_mes_graf['tipo']=="GASTO"].groupby('forma_pago')['m_ars_v'].sum().reset_index()
+            if not df_fp.empty:
+                st.plotly_chart(px.bar(df_fp, x='forma_pago', y='m_ars_v', color='forma_pago'), use_container_width=True)
+
+        col_ars, col_usd = st.columns(2)
         with col_ars:
             st.caption("Flujo Pesos")
             if not df_mes_graf[df_mes_graf['moneda']=="ARS"].empty:
@@ -430,16 +437,17 @@ with tab1:
 
         cols_show = ["estado", "tipo_gasto", "monto_visual", "cuota", "forma_pago", "fecha_pago", "pagado"]
         
+        # DEFINICIÓN CORRECTA DE COLUMN CONFIG
         col_cfg = {
-            "estado": st.column_config.TextColumn("EST", width="small"),
+            "estado": st.column_config.TextColumn("✅", width="small"),
             "tipo_gasto": st.column_config.TextColumn("CONCEPTO"),
             "monto_visual": st.column_config.TextColumn("MONTO", width="medium"),
             "cuota": st.column_config.TextColumn("CUOTA", width="small"),
             "forma_pago": st.column_config.TextColumn("FORMA PAGO", width="medium"),
             "fecha_pago": st.column_config.DateColumn("FECHA PAGO", format="DD/MM/YYYY", width="medium"),
-            # ELIMINADO 'pagado' DE AQUÍ PARA EVITAR EL ERROR
         }
 
+        # Estilo para pintar de verde
         def estilo_pagados(row):
             color = 'background-color: #1c3323' if row['pagado'] else ''
             return [color] * len(row)
@@ -460,16 +468,16 @@ with tab1:
                         st.subheader(f"📂 {grp}")
                         df_grp = df_tipo[df_tipo['grupo'] == grp]
                         
-                        # CREAR STYLER Y OCULTAR COLUMNA PAGADO DESDE PANDAS
+                        # APLICAR ESTILO
                         styled_df = df_grp[cols_show].style.apply(estilo_pagados, axis=1)
-                        styled_df.hide(axis="columns", subset=["pagado"])
-
+                        
                         selection = st.dataframe(
                             styled_df,
                             column_config=col_cfg, 
                             use_container_width=True, 
                             hide_index=True, 
                             on_select="rerun", 
+                            column_order=["estado", "tipo_gasto", "monto_visual", "cuota", "forma_pago", "fecha_pago"], # ORDEN EXPLICITO EXCLUYE 'pagado'
                             selection_mode="multi-row",
                             key=f"tbl_{gran_tipo}_{grp}_{mes_global}"
                         )
