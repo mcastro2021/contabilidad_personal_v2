@@ -325,7 +325,6 @@ with st.sidebar.form("alta"):
     f_pago = st.selectbox("PAGO", OPCIONES_PAGO)
     f_fecha = st.date_input("FECHA PAGO", datetime.date(2026, 1, 1))
     
-    # Campo extra al crear
     ya_pagado = st.checkbox("¿Ya está pagado/confirmado?")
     
     if st.form_submit_button("GRABAR"):
@@ -429,9 +428,9 @@ with tab1:
         df_view['pagado'] = df_view['pagado'].fillna(False).astype(bool)
         df_view['estado'] = df_view['pagado'].apply(lambda x: "✅" if x else "⏳")
 
-        # AGREGAMOS 'pagado' PARA QUE EL STYLER LO LEA
         cols_show = ["estado", "tipo_gasto", "monto_visual", "cuota", "forma_pago", "fecha_pago", "pagado"]
         
+        # CORRECCIÓN DE LA CONFIGURACIÓN DE COLUMNA
         col_cfg = {
             "estado": st.column_config.TextColumn("EST", width="small"),
             "tipo_gasto": st.column_config.TextColumn("CONCEPTO"),
@@ -439,7 +438,7 @@ with tab1:
             "cuota": st.column_config.TextColumn("CUOTA", width="small"),
             "forma_pago": st.column_config.TextColumn("FORMA PAGO", width="medium"),
             "fecha_pago": st.column_config.DateColumn("FECHA PAGO", format="DD/MM/YYYY", width="medium"),
-            "pagado": st.column_config.Column("Pagado", hidden=True), # OCULTO
+            "pagado": st.column_config.CheckboxColumn("Pagado", hidden=True, default=False), # CORREGIDO A CHECKBOX
         }
 
         def estilo_pagados(row):
@@ -462,7 +461,6 @@ with tab1:
                         st.subheader(f"📂 {grp}")
                         df_grp = df_tipo[df_tipo['grupo'] == grp]
                         
-                        # Fix: usar cols_show
                         styled_df = df_grp[cols_show].style.apply(estilo_pagados, axis=1)
                         
                         selection = st.dataframe(
