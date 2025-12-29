@@ -11,6 +11,7 @@ from streamlit_lottie import st_lottie
 from dotenv import load_dotenv
 import numpy as np
 from sklearn.linear_model import LinearRegression 
+from openai import OpenAI
 
 # --- CARGAR VARIABLES ---
 load_dotenv()
@@ -101,7 +102,7 @@ def init_db():
     # Tabla Usuarios
     c.execute('''CREATE TABLE IF NOT EXISTS users (username TEXT PRIMARY KEY, password TEXT)''')
     
-    # --- TABLA DEUDAS (RESTAURADA) ---
+    # --- TABLA DEUDAS ---
     c.execute('''CREATE TABLE IF NOT EXISTS deudas 
                  (id SERIAL PRIMARY KEY, nombre_deuda TEXT, monto_total REAL, moneda TEXT, fecha_inicio TEXT, estado TEXT)''')
     
@@ -363,7 +364,7 @@ with st.sidebar.form("alta"):
         st.balloons(); st.success("Guardado"); st.rerun()
 
 # --- TABS ---
-tab1, tab2, tab3, tab4, tab5 = st.tabs(["📊 DASHBOARD", "🔮 PREDICCIONES", "⚙️ CONFIGURACIÓN", "📉 DEUDAS / PAGOS PARCIALES", "🛠️ HERRAMIENTAS"])
+tab1, tab2, tab3, tab4 = st.tabs(["📊 DASHBOARD", "🔮 PREDICCIONES", "⚙️ CONFIGURACIÓN", "📉 DEUDAS / PAGOS PARCIALES"])
 
 with tab1:
     st.info(f"Dolar Blue: {formato_moneda_visual(dolar_val, 'ARS')} {dolar_info}")
@@ -611,7 +612,7 @@ with tab3: # CONFIG
                           (str(datetime.date.today()), t, r['tipo'], r['grupo'], r['tipo_gasto'], r['cuota'], r['monto'], r['moneda'], r['forma_pago'], r['fecha_pago']))
         conn.commit(); st.success("Clonado."); st.rerun()
 
-# --- NUEVA PESTAÑA: DEUDAS Y PAGOS PARCIALES ---
+# --- NUEVA PESTAÑA 4: DEUDAS Y PAGOS PARCIALES ---
 with tab4:
     st.header("📉 Gestión de Deudas y Pagos Parciales")
     st.caption("Registra aquí tus deudas totales y ve pagando de a poco. Estos pagos aparecerán en tu flujo de caja mensual.")
@@ -633,35 +634,52 @@ with tab4:
                 conn.commit(); st.success("Deuda Creada"); st.rerun()
 
     with c_deuda2:
-        st.subheader("📋 Mis Deudas")
+        st.subheader("📋 Mis Deudas Activas")
+        # Mostrar solo deudas activas para no llenar la pantalla
         deudas_df = pd.read_sql("SELECT * FROM deudas WHERE estado='ACTIVA'", conn)
         
         if not deudas_df.empty:
             for _, deuda in deudas_df.iterrows():
-                with st.expander(f"{deuda['nombre_deuda']} ({formato_moneda_visual(deuda['monto_total'], deuda['moneda'])})"):
+                with st.expander(f"{deuda['nombre_deuda']} ({formato_moneda_visual(deuda['monto_total'], deuda['moneda'])})", expanded=True):
                     # Calcular pagado hasta ahora buscando en MOVIMIENTOS
+                    # Vinculamos por nombre en el concepto. Es un método simple y efectivo.
                     c.execute("""
-                        SELECT SUM(monto) FROM movimientos 
+                        SELECT id, fecha_pago, monto FROM movimientos 
                         WHERE grupo='DEUDAS' AND tipo_gasto LIKE %s AND moneda=%s
                     """, (f"%{deuda['nombre_deuda']}%", deuda['moneda']))
                     
-                    pagado = c.fetchone()[0] or 0.0
-                    restante = deuda['monto_total'] - pagado
-                    progreso = min(pagado / deuda['monto_total'], 1.0) if deuda['monto_total'] > 0 else 0
+                    pagos_realizados = c.fetchall()
+                    total_pagado = sum([p[2] for p in pagos_realizados])
+                    restante = deuda['monto_total'] - total_pagado
+                    progreso = min(total_pagado / deuda['monto_total'], 1.0) if deuda['monto_total'] > 0 else 0
                     
                     st.progress(progreso)
                     c1, c2, c3 = st.columns(3)
                     c1.metric("Total", formato_moneda_visual(deuda['monto_total'], deuda['moneda']))
-                    c2.metric("Pagado", formato_moneda_visual(pagado, deuda['moneda']))
+                    c2.metric("Pagado", formato_moneda_visual(total_pagado, deuda['moneda']))
                     c3.metric("Falta", formato_moneda_visual(restante, deuda['moneda']))
                     
+                    # --- HISTORIAL DE PAGOS CON BORRADO INDIVIDUAL ---
+                    if pagos_realizados:
+                        st.markdown("###### 📜 Historial de Pagos")
+                        for p in pagos_realizados:
+                            col_h1, col_h2, col_h3 = st.columns([2, 2, 1])
+                            col_h1.write(f"📅 {p[1]}")
+                            col_h2.write(f"💰 {formato_moneda_visual(p[2], deuda['moneda'])}")
+                            if col_h3.button("🗑️", key=f"del_pago_{p[0]}"):
+                                c.execute("DELETE FROM movimientos WHERE id=%s", (p[0],))
+                                conn.commit()
+                                actualizar_saldos_en_cascada(mes_global)
+                                st.rerun()
+                        st.markdown("---")
+
+                    # --- ACCIONES PRINCIPALES ---
                     if restante <= 0:
                         st.success("¡DEUDA PAGADA!")
-                        if st.button("Archivar Deuda", key=f"arch_{deuda['id']}"):
+                        if st.button("Archivar como Pagada", key=f"arch_{deuda['id']}"):
                             c.execute("UPDATE deudas SET estado='PAGADA' WHERE id=%s", (deuda['id'],)); conn.commit(); st.rerun()
                     else:
-                        st.markdown("---")
-                        st.write("**Registrar un pago parcial:**")
+                        st.write("**Registrar nuevo pago:**")
                         c_pago1, c_pago2 = st.columns(2)
                         monto_pago = c_pago1.text_input("Monto a Pagar", key=f"mp_{deuda['id']}")
                         forma_pago_d = c_pago2.selectbox("Forma de Pago", OPCIONES_PAGO, key=f"fp_{deuda['id']}")
@@ -669,6 +687,7 @@ with tab4:
                         if st.button("💸 Registrar Pago", key=f"btn_{deuda['id']}"):
                             m_pago_real = procesar_monto_input(monto_pago)
                             if m_pago_real > 0:
+                                # Insertamos en la tabla principal para que afecte el flujo de caja
                                 concepto_pago = f"Pago parcial: {deuda['nombre_deuda']}"
                                 c.execute("""INSERT INTO movimientos 
                                     (fecha, mes, tipo, grupo, tipo_gasto, cuota, monto, moneda, forma_pago, fecha_pago) 
@@ -677,8 +696,16 @@ with tab4:
                                 conn.commit()
                                 actualizar_saldos_en_cascada(mes_global)
                                 st.balloons()
-                                st.success("Pago registrado correctamente")
+                                st.success("Pago registrado")
                                 st.rerun()
+                    
+                    st.markdown("---")
+                    # BOTÓN DE ELIMINAR DEUDA COMPLETA (ROJO)
+                    if st.button("❌ ELIMINAR DEUDA", key=f"del_debt_{deuda['id']}", type="primary"):
+                        c.execute("DELETE FROM deudas WHERE id=%s", (deuda['id'],))
+                        conn.commit()
+                        st.warning("Deuda eliminada.")
+                        st.rerun()
         else:
             st.info("No tienes deudas activas.")
             
