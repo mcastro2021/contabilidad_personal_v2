@@ -437,12 +437,10 @@ with tab1:
             "cuota": st.column_config.TextColumn("CUOTA", width="small"),
             "forma_pago": st.column_config.TextColumn("FORMA PAGO", width="medium"),
             "fecha_pago": st.column_config.DateColumn("FECHA PAGO", format="DD/MM/YYYY", width="medium"),
-            "pagado": st.column_config.Column("Pagado", hidden=True), # VOLVEMOS A GENÉRICO PERO SOLO PARA OCULTAR
+            # ELIMINADO 'pagado' DE AQUÍ PARA EVITAR EL ERROR
         }
 
-        # ESTILO
         def estilo_pagados(row):
-            # Pintamos toda la fila si está pagado
             color = 'background-color: #1c3323' if row['pagado'] else ''
             return [color] * len(row)
 
@@ -462,9 +460,8 @@ with tab1:
                         st.subheader(f"📂 {grp}")
                         df_grp = df_tipo[df_tipo['grupo'] == grp]
                         
-                        # APLICAR ESTILO
+                        # CREAR STYLER Y OCULTAR COLUMNA PAGADO DESDE PANDAS
                         styled_df = df_grp[cols_show].style.apply(estilo_pagados, axis=1)
-                        # OCULTAR COLUMNA PAGADO DESDE PANDAS PARA EVITAR ERROR EN COLUMN CONFIG
                         styled_df.hide(axis="columns", subset=["pagado"])
 
                         selection = st.dataframe(
