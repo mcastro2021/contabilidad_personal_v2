@@ -11,7 +11,6 @@ from streamlit_lottie import st_lottie
 from dotenv import load_dotenv
 import numpy as np
 from sklearn.linear_model import LinearRegression 
-from openai import OpenAI
 
 # --- CARGAR VARIABLES ---
 load_dotenv()
@@ -97,12 +96,19 @@ def init_db():
                  (id SERIAL PRIMARY KEY, fecha TEXT, mes TEXT, 
                   tipo TEXT, grupo TEXT, tipo_gasto TEXT, cuota TEXT, monto REAL, moneda TEXT,
                   forma_pago TEXT, fecha_pago TEXT)''')
+    
+    # --- MIGRACIÓN AUTOMÁTICA: AGREGAR COLUMNA PAGADO ---
+    try:
+        c.execute("ALTER TABLE movimientos ADD COLUMN pagado BOOLEAN DEFAULT FALSE")
+        conn.commit()
+    except:
+        conn.rollback() # Ya existe la columna
+
     # Tabla Grupos
     c.execute('''CREATE TABLE IF NOT EXISTS grupos (nombre TEXT PRIMARY KEY)''')
     # Tabla Usuarios
     c.execute('''CREATE TABLE IF NOT EXISTS users (username TEXT PRIMARY KEY, password TEXT)''')
-    
-    # --- TABLA DEUDAS ---
+    # Tabla Deudas
     c.execute('''CREATE TABLE IF NOT EXISTS deudas 
                  (id SERIAL PRIMARY KEY, nombre_deuda TEXT, monto_total REAL, moneda TEXT, fecha_inicio TEXT, estado TEXT)''')
     
@@ -319,6 +325,9 @@ with st.sidebar.form("alta"):
     f_pago = st.selectbox("PAGO", OPCIONES_PAGO)
     f_fecha = st.date_input("FECHA PAGO", datetime.date(2026, 1, 1))
     
+    # Campo extra al crear: ¿Ya está pagado?
+    ya_pagado = st.checkbox("¿Ya está pagado/confirmado?")
+    
     if st.form_submit_button("GRABAR"):
         m_final = procesar_monto_input(m_input)
         conn = get_db_connection()
@@ -336,9 +345,9 @@ with st.sidebar.form("alta"):
                 monto_guardar = val_calc
                 
             c.execute("""INSERT INTO movimientos 
-                (fecha, mes, tipo, grupo, tipo_gasto, cuota, monto, moneda, forma_pago, fecha_pago) 
-                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
-                (str(datetime.date.today()), mes_t, t_sel, g_sel, concepto, "", monto_guardar, mon_sel, f_pago, f_fecha.strftime('%Y-%m-%d')))
+                (fecha, mes, tipo, grupo, tipo_gasto, cuota, monto, moneda, forma_pago, fecha_pago, pagado) 
+                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
+                (str(datetime.date.today()), mes_t, t_sel, g_sel, concepto, "", monto_guardar, mon_sel, f_pago, f_fecha.strftime('%Y-%m-%d'), ya_pagado))
         
         else:
             for i in range(cuota_actual, total_cuotas + 1):
@@ -354,10 +363,13 @@ with st.sidebar.form("alta"):
                     cuota_str = f"{i}/{total_cuotas}"
                     fecha_v = f_fecha + datetime.timedelta(days=30*offset)
                     
+                    # Para cuotas futuras, asumimos NO pagado (False) a menos que sea el mes actual y se haya marcado
+                    es_pagado_cuota = ya_pagado if offset == 0 else False
+                    
                     c.execute("""INSERT INTO movimientos 
-                        (fecha, mes, tipo, grupo, tipo_gasto, cuota, monto, moneda, forma_pago, fecha_pago) 
-                        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
-                        (str(datetime.date.today()), mes_t, t_sel, g_sel, concepto, cuota_str, monto_guardar, mon_sel, f_pago, fecha_v.strftime('%Y-%m-%d')))
+                        (fecha, mes, tipo, grupo, tipo_gasto, cuota, monto, moneda, forma_pago, fecha_pago, pagado) 
+                        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
+                        (str(datetime.date.today()), mes_t, t_sel, g_sel, concepto, cuota_str, monto_guardar, mon_sel, f_pago, fecha_v.strftime('%Y-%m-%d'), es_pagado_cuota))
         
         conn.commit(); conn.close()
         actualizar_saldos_en_cascada(mes_global)
@@ -410,17 +422,33 @@ with tab1:
 
         st.markdown("---") 
         
-        # TABLAS JERARQUICAS
+        # TABLAS JERARQUICAS CON ESTILO CONDICIONAL
         df_view = df_mes.copy()
         df_view['monto_visual'] = df_view.apply(lambda x: formato_moneda_visual(x['monto'], x['moneda']), axis=1)
-        cols_show = ["tipo_gasto", "monto_visual", "cuota", "forma_pago", "fecha_pago"]
+        
+        # Asegurar columna pagado
+        if 'pagado' not in df_view.columns:
+            df_view['pagado'] = False
+        else:
+            df_view['pagado'] = df_view['pagado'].fillna(False).astype(bool)
+
+        # Crear columna de estado visual
+        df_view['estado'] = df_view['pagado'].apply(lambda x: "✅" if x else "⏳")
+
+        cols_show = ["estado", "tipo_gasto", "monto_visual", "cuota", "forma_pago", "fecha_pago"]
         col_cfg = {
+            "estado": st.column_config.TextColumn("EST", width="small"),
             "tipo_gasto": st.column_config.TextColumn("CONCEPTO"),
             "monto_visual": st.column_config.TextColumn("MONTO", width="medium"),
             "cuota": st.column_config.TextColumn("CUOTA", width="small"),
             "forma_pago": st.column_config.TextColumn("FORMA PAGO", width="medium"),
             "fecha_pago": st.column_config.DateColumn("FECHA PAGO", format="DD/MM/YYYY", width="medium"),
         }
+
+        # Función para pintar filas pagadas
+        def estilo_pagados(row):
+            color = 'background-color: #1c3323' if row['pagado'] else ''
+            return [color] * len(row)
 
         selected_records = []
 
@@ -438,8 +466,11 @@ with tab1:
                         st.subheader(f"📂 {grp}")
                         df_grp = df_tipo[df_tipo['grupo'] == grp]
                         
+                        # Aplicar estilo
+                        styled_df = df_grp[cols_show].style.apply(estilo_pagados, axis=1)
+                        
                         selection = st.dataframe(
-                            df_grp[cols_show], 
+                            styled_df, # Usamos el DF estilizado
                             column_config=col_cfg, 
                             use_container_width=True, 
                             hide_index=True, 
@@ -464,6 +495,7 @@ with tab1:
                                 selected_records.append(df_grp.iloc[idx])
                 st.divider()
 
+        # ACCIONES
         if len(selected_records) == 1:
             row_to_edit = selected_records[0]
             st.markdown(f"### ✏️ EDITANDO: {row_to_edit['tipo_gasto']}")
@@ -478,11 +510,15 @@ with tab1:
                 new_m = c_e4.text_input("Monto", value=val_clean)
                 new_mon = c_e5.selectbox("Moneda", ["ARS", "USD"], index=["ARS", "USD"].index(row_to_edit['moneda']))
                 new_cuota = c_e6.text_input("Cuota", value=str(row_to_edit['cuota'])) 
-                c_e7, c_e8 = st.columns(2)
+                c_e7, c_e8, c_e9 = st.columns(3)
                 new_pago = c_e7.selectbox("Forma Pago", OPCIONES_PAGO, index=OPCIONES_PAGO.index(row_to_edit['forma_pago']) if row_to_edit['forma_pago'] in OPCIONES_PAGO else 0)
                 try: f_dt = pd.to_datetime(row_to_edit['fecha_pago']).date()
                 except: f_dt = datetime.date(2026, 1, 1)
                 new_f = c_e8.date_input("Fecha Pago", value=f_dt)
+                
+                # Checkbox de Pagado
+                val_pagado = bool(row_to_edit['pagado']) if 'pagado' in row_to_edit else False
+                new_pagado = c_e9.checkbox("✅ MARCAR COMO PAGADO", value=val_pagado)
                 
                 b1, b2 = st.columns([1, 1])
                 conn = get_db_connection(); c = conn.cursor()
@@ -493,7 +529,10 @@ with tab1:
                     if new_c.strip().upper() == "SALARIO CHICOS" and val_calc is not None:
                         m_f = val_calc
                     
-                    c.execute("UPDATE movimientos SET tipo=%s, grupo=%s, tipo_gasto=%s, monto=%s, moneda=%s, cuota=%s, forma_pago=%s, fecha_pago=%s WHERE id=%s", (new_tipo, new_g, new_c, m_f, new_mon, new_cuota, new_pago, str(new_f), id_mov))
+                    c.execute("""UPDATE movimientos 
+                        SET tipo=%s, grupo=%s, tipo_gasto=%s, monto=%s, moneda=%s, cuota=%s, forma_pago=%s, fecha_pago=%s, pagado=%s 
+                        WHERE id=%s""", 
+                        (new_tipo, new_g, new_c, m_f, new_mon, new_cuota, new_pago, str(new_f), new_pagado, id_mov))
                     conn.commit()
                     if new_cuota != row_to_edit['cuota']:
                         propagar_edicion_cuotas(mes_global, new_c, new_g, m_f, new_mon, new_pago, new_f, new_cuota)
@@ -510,18 +549,28 @@ with tab1:
             st.markdown("---")
             st.markdown("### 🛠️ EDICIÓN MASIVA")
             st.warning(f"Seleccionados: {len(selected_records)}")
-            c_mass_1, c_mass_2, c_mass_3 = st.columns(3)
+            c_mass_1, c_mass_2, c_mass_3, c_mass_4 = st.columns(4)
             with c_mass_1:
                 new_mass_date = st.date_input("Nueva Fecha de Pago", datetime.date.today())
             with c_mass_2:
                 new_mass_payment = st.selectbox("Nueva Forma de Pago", OPCIONES_PAGO)
             with c_mass_3:
+                # Masivo marcar como pagado
+                mark_paid = st.checkbox("✅ Marcar TODOS como pagados")
+            with c_mass_4:
                 st.write("") 
                 st.write("") 
                 if st.button("💾 ACTUALIZAR TODO"):
                     conn = get_db_connection(); c = conn.cursor()
                     ids_to_update = tuple([int(r['id']) for r in selected_records])
-                    c.execute("UPDATE movimientos SET fecha_pago = %s, forma_pago = %s WHERE id IN %s", (str(new_mass_date), new_mass_payment, ids_to_update))
+                    
+                    # Si marca el check, actualiza pagado=True, si no, mantiene el valor original (no lo desmarca masivamente por seguridad, o si?)
+                    # Mejor logica: Solo si marca el check, lo pone en True.
+                    if mark_paid:
+                        c.execute("UPDATE movimientos SET fecha_pago = %s, forma_pago = %s, pagado = TRUE WHERE id IN %s", (str(new_mass_date), new_mass_payment, ids_to_update))
+                    else:
+                        c.execute("UPDATE movimientos SET fecha_pago = %s, forma_pago = %s WHERE id IN %s", (str(new_mass_date), new_mass_payment, ids_to_update))
+                        
                     conn.commit(); conn.close()
                     st.success("Registros actualizados"); st.rerun()
             
@@ -690,8 +739,8 @@ with tab4:
                                 # Insertamos en la tabla principal para que afecte el flujo de caja
                                 concepto_pago = f"Pago parcial: {deuda['nombre_deuda']}"
                                 c.execute("""INSERT INTO movimientos 
-                                    (fecha, mes, tipo, grupo, tipo_gasto, cuota, monto, moneda, forma_pago, fecha_pago) 
-                                    VALUES (%s, %s, 'GASTO', 'DEUDAS', %s, '', %s, %s, %s, %s)""",
+                                    (fecha, mes, tipo, grupo, tipo_gasto, cuota, monto, moneda, forma_pago, fecha_pago, pagado) 
+                                    VALUES (%s, %s, 'GASTO', 'DEUDAS', %s, '', %s, %s, %s, %s, TRUE)""",
                                     (str(datetime.date.today()), mes_global, concepto_pago, m_pago_real, deuda['moneda'], forma_pago_d, str(datetime.date.today())))
                                 conn.commit()
                                 actualizar_saldos_en_cascada(mes_global)
