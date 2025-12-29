@@ -11,7 +11,6 @@ from streamlit_lottie import st_lottie
 from dotenv import load_dotenv
 import numpy as np
 from sklearn.linear_model import LinearRegression 
-from openai import OpenAI
 
 # --- CARGAR VARIABLES ---
 load_dotenv()
@@ -53,7 +52,6 @@ def load_lottieurl(url):
     except: return None
 
 LOTTIE_FINANCE = "https://lottie.host/02a55953-2736-4763-b183-116515b81045/L1O1fW89yB.json" 
-LOTTIE_CHAT = "https://lottie.host/3c6e93e4-8671-419b-b5e2-632009028f9d/p1A7v0gQ2z.json"
 
 def make_hashes(password):
     return hashlib.sha256(str.encode(password)).hexdigest()
@@ -93,23 +91,16 @@ def get_db_connection():
 def init_db():
     conn = get_db_connection()
     c = conn.cursor()
-    # Tabla Movimientos
     c.execute('''CREATE TABLE IF NOT EXISTS movimientos 
                  (id SERIAL PRIMARY KEY, fecha TEXT, mes TEXT, 
                   tipo TEXT, grupo TEXT, tipo_gasto TEXT, cuota TEXT, monto REAL, moneda TEXT,
                   forma_pago TEXT, fecha_pago TEXT)''')
-    # Tabla Grupos
     c.execute('''CREATE TABLE IF NOT EXISTS grupos (nombre TEXT PRIMARY KEY)''')
-    # Tabla Usuarios
     c.execute('''CREATE TABLE IF NOT EXISTS users (username TEXT PRIMARY KEY, password TEXT)''')
-    
-    # --- NUEVA TABLA: DEUDAS ---
-    c.execute('''CREATE TABLE IF NOT EXISTS deudas 
-                 (id SERIAL PRIMARY KEY, nombre_deuda TEXT, monto_total REAL, moneda TEXT, fecha_inicio TEXT, estado TEXT)''')
     
     c.execute("SELECT count(*) FROM grupos")
     if c.fetchone()[0] == 0:
-        c.executemany("INSERT INTO grupos VALUES (%s) ON CONFLICT DO NOTHING", [("AHORRO MANUEL",), ("CASA",), ("AUTO",), ("VARIOS",), ("DEUDAS",)])
+        c.executemany("INSERT INTO grupos VALUES (%s) ON CONFLICT DO NOTHING", [("AHORRO MANUEL",), ("CASA",), ("AUTO",), ("VARIOS",)])
     
     c.execute("SELECT count(*) FROM users")
     if c.fetchone()[0] == 0:
@@ -365,8 +356,7 @@ with st.sidebar.form("alta"):
         st.balloons(); st.success("Guardado"); st.rerun()
 
 # --- TABS ---
-# AÑADIDA TAB 5: DEUDAS
-tab1, tab2, tab3, tab4, tab5 = st.tabs(["📊 DASHBOARD", "🔮 PREDICCIONES", "💬 CHAT IA", "⚙️ CONFIGURACIÓN", "📉 DEUDAS / PAGOS PARCIALES"])
+tab1, tab2, tab3 = st.tabs(["📊 DASHBOARD", "🔮 PREDICCIONES", "⚙️ CONFIGURACIÓN"])
 
 with tab1:
     st.info(f"Dolar Blue: {formato_moneda_visual(dolar_val, 'ARS')} {dolar_info}")
@@ -486,31 +476,9 @@ with tab1:
                 except: f_dt = datetime.date(2026, 1, 1)
                 new_f = c_e8.date_input("Fecha Pago", value=f_dt)
                 
-                st.divider()
-                st.markdown("##### 🔁 Repetir Gasto")
-                c_rep_1, c_rep_2 = st.columns([1, 1])
-                cant_meses = c_rep_1.number_input("Cantidad de meses a repetir (copia exacta)", min_value=1, value=1)
-                do_duplicar = c_rep_2.form_submit_button("Duplicar en meses futuros")
-
                 b1, b2 = st.columns([1, 1])
-                
                 conn = get_db_connection(); c = conn.cursor()
                 
-                if do_duplicar:
-                    idx_mes_actual = LISTA_MESES_LARGA.index(row_to_edit['mes'])
-                    m_f = procesar_monto_input(new_m)
-                    for i in range(1, cant_meses + 1):
-                        if idx_mes_actual + i < len(LISTA_MESES_LARGA):
-                            mes_futuro = LISTA_MESES_LARGA[idx_mes_actual + i]
-                            fecha_futura = f_dt + datetime.timedelta(days=30*i)
-                            c.execute("""INSERT INTO movimientos 
-                                (fecha, mes, tipo, grupo, tipo_gasto, cuota, monto, moneda, forma_pago, fecha_pago) 
-                                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
-                                (str(datetime.date.today()), mes_futuro, new_tipo, new_g, new_c, "", m_f, new_mon, new_pago, fecha_futura.strftime('%Y-%m-%d')))
-                    conn.commit()
-                    actualizar_saldos_en_cascada(row_to_edit['mes'])
-                    st.success(f"Duplicado por {cant_meses} meses."); st.rerun()
-
                 if b1.form_submit_button("💾 GUARDAR CAMBIOS"):
                     m_f = procesar_monto_input(new_m)
                     val_calc = calcular_monto_salario_mes(row_to_edit['mes'])
@@ -534,23 +502,29 @@ with tab1:
             st.markdown("---")
             st.markdown("### 🛠️ EDICIÓN MASIVA")
             st.warning(f"Seleccionados: {len(selected_records)}")
-            c_mass_1, c_mass_2 = st.columns(2)
+            c_mass_1, c_mass_2, c_mass_3 = st.columns(3)
             with c_mass_1:
-                new_mass_date = st.date_input("Nueva Fecha de Pago para selección", datetime.date.today())
-                if st.button("📅 ACTUALIZAR FECHAS"):
+                new_mass_date = st.date_input("Nueva Fecha de Pago", datetime.date.today())
+            with c_mass_2:
+                new_mass_payment = st.selectbox("Nueva Forma de Pago", OPCIONES_PAGO)
+            with c_mass_3:
+                st.write("") # Spacer
+                st.write("") 
+                if st.button("💾 ACTUALIZAR TODO"):
                     conn = get_db_connection(); c = conn.cursor()
                     ids_to_update = tuple([int(r['id']) for r in selected_records])
-                    c.execute("UPDATE movimientos SET fecha_pago = %s WHERE id IN %s", (str(new_mass_date), ids_to_update))
+                    c.execute("UPDATE movimientos SET fecha_pago = %s, forma_pago = %s WHERE id IN %s", (str(new_mass_date), new_mass_payment, ids_to_update))
                     conn.commit(); conn.close()
-                    st.success("Fechas actualizadas"); st.rerun()
-            with c_mass_2:
-                if st.button(f"❌ ELIMINAR SELECCIÓN", type="primary"):
-                    conn = get_db_connection(); c = conn.cursor()
-                    ids_to_delete = tuple([int(r['id']) for r in selected_records])
-                    c.execute("DELETE FROM movimientos WHERE id IN %s", (ids_to_delete,))
-                    conn.commit(); conn.close()
-                    actualizar_saldos_en_cascada(mes_global)
-                    st.success("Eliminados."); st.rerun()
+                    st.success("Registros actualizados"); st.rerun()
+            
+            st.divider()
+            if st.button(f"❌ ELIMINAR SELECCIÓN", type="primary"):
+                conn = get_db_connection(); c = conn.cursor()
+                ids_to_delete = tuple([int(r['id']) for r in selected_records])
+                c.execute("DELETE FROM movimientos WHERE id IN %s", (ids_to_delete,))
+                conn.commit(); conn.close()
+                actualizar_saldos_en_cascada(mes_global)
+                st.success("Eliminados."); st.rerun()
     else: st.info("Sin datos.")
 
 with tab2: # PREDICCIONES
@@ -589,43 +563,8 @@ with tab2: # PREDICCIONES
         else: st.warning("Faltan datos para predecir.")
     else: st.info("Sin gastos registrados.")
 
-with tab3: # CHAT IA
-    c1, c2 = st.columns([1,3])
-    with c1:
-        lottie_chat = load_lottieurl(LOTTIE_CHAT)
-        if lottie_chat: st_lottie(lottie_chat, height=120)
-    with c2:
-        st.header("💬 Chat Financiero")
-    api_key = os.environ.get("OPENAI_API_KEY")
-    if not api_key: api_key = st.text_input("OpenAI API Key:", type="password")
-    if api_key:
-        query = st.text_area("Pregunta:")
-        if st.button("🤖 Consultar") and query:
-            with st.spinner("Analizando..."):
-                try:
-                    df_sample = df_all.head(3).to_markdown()
-                    columnas = list(df_all.columns)
-                    prompt = f"Data: {df_sample}. Query: {query}. Respond ONLY python code."
-                    client = OpenAI(api_key=api_key)
-                    response = client.chat.completions.create(model="gpt-4o-mini", messages=[{"role": "user", "content": prompt}])
-                    codigo = response.choices[0].message.content.replace("```python", "").replace("```", "").strip()
-                    local_vars = {"df": df_all, "px": px, "pd": pd}
-                    exec(codigo, globals(), local_vars)
-                    if "resultado" in local_vars: st.success(local_vars["resultado"])
-                    if "fig" in local_vars: st.plotly_chart(local_vars["fig"])
-                except Exception as e: st.error(str(e))
-
-with tab4: # CONFIG
+with tab3: # CONFIG
     st.header("⚙️ Configuración")
-    
-    with st.expander("📅 ALINEAR FECHAS CON EL MES"):
-        st.info("Corrige fechas de pago desfasadas.")
-        if st.button("CORREGIR FECHAS"):
-            count = alinear_fechas_pago_masivo()
-            st.success(f"Se corrigieron {count} registros.")
-            st.rerun()
-
-    st.divider()
     
     st.markdown("### 📤 MIGRACIÓN")
     archivo_db = st.file_uploader("Archivo .db", type=["db", "sqlite", "sqlite3"])
@@ -664,79 +603,3 @@ with tab4: # CONFIG
                 c.execute("INSERT INTO movimientos (fecha, mes, tipo, grupo, tipo_gasto, cuota, monto, moneda, forma_pago, fecha_pago) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)", 
                           (str(datetime.date.today()), t, r['tipo'], r['grupo'], r['tipo_gasto'], r['cuota'], r['monto'], r['moneda'], r['forma_pago'], r['fecha_pago']))
         conn.commit(); st.success("Clonado."); st.rerun()
-
-# --- NUEVA PESTAÑA: DEUDAS Y PAGOS PARCIALES ---
-with tab5:
-    st.header("📉 Gestión de Deudas y Pagos Parciales")
-    st.caption("Registra aquí tus deudas totales y ve pagando de a poco. Estos pagos aparecerán en tu flujo de caja mensual.")
-
-    c_deuda1, c_deuda2 = st.columns([1, 2])
-    
-    conn = get_db_connection(); c = conn.cursor()
-    
-    with c_deuda1:
-        st.subheader("➕ Nueva Deuda")
-        with st.form("nueva_deuda"):
-            n_deuda = st.text_input("Nombre de la Deuda (Ej: Préstamo Juan)")
-            m_deuda = st.text_input("Monto Total a Deber", "0,00")
-            mon_deuda = st.selectbox("Moneda", ["ARS", "USD"])
-            if st.form_submit_button("Crear Deuda"):
-                monto_real = procesar_monto_input(m_deuda)
-                c.execute("INSERT INTO deudas (nombre_deuda, monto_total, moneda, fecha_inicio, estado) VALUES (%s, %s, %s, %s, 'ACTIVA')", 
-                          (n_deuda, monto_real, mon_deuda, str(datetime.date.today())))
-                conn.commit(); st.success("Deuda Creada"); st.rerun()
-
-    with c_deuda2:
-        st.subheader("📋 Mis Deudas")
-        deudas_df = pd.read_sql("SELECT * FROM deudas WHERE estado='ACTIVA'", conn)
-        
-        if not deudas_df.empty:
-            for _, deuda in deudas_df.iterrows():
-                with st.expander(f"{deuda['nombre_deuda']} ({formato_moneda_visual(deuda['monto_total'], deuda['moneda'])})"):
-                    # Calcular pagado hasta ahora buscando en MOVIMIENTOS
-                    # Buscamos movimientos donde grupo='DEUDAS' y el concepto contenga el nombre de la deuda
-                    # Esto vincula ambas tablas
-                    c.execute("""
-                        SELECT SUM(monto) FROM movimientos 
-                        WHERE grupo='DEUDAS' AND tipo_gasto LIKE %s AND moneda=%s
-                    """, (f"%{deuda['nombre_deuda']}%", deuda['moneda']))
-                    
-                    pagado = c.fetchone()[0] or 0.0
-                    restante = deuda['monto_total'] - pagado
-                    progreso = min(pagado / deuda['monto_total'], 1.0) if deuda['monto_total'] > 0 else 0
-                    
-                    st.progress(progreso)
-                    c1, c2, c3 = st.columns(3)
-                    c1.metric("Total", formato_moneda_visual(deuda['monto_total'], deuda['moneda']))
-                    c2.metric("Pagado", formato_moneda_visual(pagado, deuda['moneda']))
-                    c3.metric("Falta", formato_moneda_visual(restante, deuda['moneda']))
-                    
-                    if restante <= 0:
-                        st.success("¡DEUDA PAGADA!")
-                        if st.button("Archivar Deuda", key=f"arch_{deuda['id']}"):
-                            c.execute("UPDATE deudas SET estado='PAGADA' WHERE id=%s", (deuda['id'],)); conn.commit(); st.rerun()
-                    else:
-                        st.markdown("---")
-                        st.write("**Registrar un pago parcial:**")
-                        c_pago1, c_pago2 = st.columns(2)
-                        monto_pago = c_pago1.text_input("Monto a Pagar", key=f"mp_{deuda['id']}")
-                        forma_pago_d = c_pago2.selectbox("Forma de Pago", OPCIONES_PAGO, key=f"fp_{deuda['id']}")
-                        
-                        if st.button("💸 Registrar Pago", key=f"btn_{deuda['id']}"):
-                            m_pago_real = procesar_monto_input(monto_pago)
-                            if m_pago_real > 0:
-                                # Insertamos en la tabla principal para que afecte el flujo de caja
-                                concepto_pago = f"Pago parcial: {deuda['nombre_deuda']}"
-                                c.execute("""INSERT INTO movimientos 
-                                    (fecha, mes, tipo, grupo, tipo_gasto, cuota, monto, moneda, forma_pago, fecha_pago) 
-                                    VALUES (%s, %s, 'GASTO', 'DEUDAS', %s, '', %s, %s, %s, %s)""",
-                                    (str(datetime.date.today()), mes_global, concepto_pago, m_pago_real, deuda['moneda'], forma_pago_d, str(datetime.date.today())))
-                                conn.commit()
-                                actualizar_saldos_en_cascada(mes_global)
-                                st.balloons()
-                                st.success("Pago registrado correctamente")
-                                st.rerun()
-        else:
-            st.info("No tienes deudas activas.")
-            
-    conn.close()
