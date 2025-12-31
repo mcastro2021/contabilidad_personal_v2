@@ -11,6 +11,7 @@ from streamlit_lottie import st_lottie
 from dotenv import load_dotenv
 import numpy as np
 from sklearn.linear_model import LinearRegression 
+import calendar
 
 # --- CARGAR VARIABLES ---
 load_dotenv()
@@ -325,7 +326,7 @@ with st.sidebar.form("alta"):
     f_pago = st.selectbox("PAGO", OPCIONES_PAGO)
     f_fecha = st.date_input("FECHA PAGO", datetime.date(2026, 1, 1))
     
-    ya_pagado = st.checkbox("¿YA ESTÁ PAGADO?")
+    ya_pagado = st.checkbox("¿Ya está pagado/confirmado?")
     
     if st.form_submit_button("GRABAR"):
         m_final = procesar_monto_input(m_input)
@@ -398,6 +399,96 @@ with tab1:
         
         st.divider()
 
+        # --- CALENDARIO INTERACTIVO ---
+        try:
+            mes_nombre, anio_num = mes_global.split(" ")
+            anio_val = int(anio_num)
+            meses_dict = {"Enero":1,"Febrero":2,"Marzo":3,"Abril":4,"Mayo":5,"Junio":6,"Julio":7,"Agosto":8,"Septiembre":9,"Octubre":10,"Noviembre":11,"Diciembre":12}
+            mes_val = meses_dict.get(mes_nombre, 1)
+            
+            _, num_dias = calendar.monthrange(anio_val, mes_val)
+            fechas_mes = [datetime.date(anio_val, mes_val, d) for d in range(1, num_dias+1)]
+            
+            # Agrupar datos por fecha
+            df_cal = df_mes.copy()
+            df_cal['fecha_dt'] = pd.to_datetime(df_cal['fecha_pago']).dt.date
+            
+            # Crear dataframe para el calendario
+            cal_data = []
+            for f in fechas_mes:
+                monto_dia = df_cal[df_cal['fecha_dt'] == f]['monto'].sum()
+                cal_data.append({
+                    "Fecha": f,
+                    "Dia": f.day,
+                    "Semana": int(f.strftime("%U")), # Semana del año para Y
+                    "DiaSemana": f.weekday(), # 0=Lunes
+                    "Monto": monto_dia,
+                    "Color": monto_dia if monto_dia > 0 else 0
+                })
+            
+            df_calendar = pd.DataFrame(cal_data)
+            
+            # Normalizar semanas para que la primera semana del mes sea 0 (arriba)
+            min_sem = df_calendar['Semana'].min()
+            df_calendar['SemanaRel'] = df_calendar['Semana'] - min_sem
+            
+            fig_cal = go.Figure(data=go.Scatter(
+                x=df_calendar['DiaSemana'],
+                y=df_calendar['SemanaRel'],
+                text=df_calendar['Dia'],
+                mode='markers+text',
+                marker=dict(
+                    size=40,
+                    symbol='square',
+                    color=df_calendar['Color'],
+                    colorscale='Greens',
+                    showscale=False,
+                    line=dict(width=1, color='DarkSlateGrey')
+                ),
+                textfont=dict(color='black', size=14, family="Arial Black"),
+                hoverinfo='text',
+                hovertext=[f"Día {r.Dia}: ${r.Monto:,.0f}" for i, r in df_calendar.iterrows()]
+            ))
+            
+            dias_semana = ["Lun", "Mar", "Mié", "Jue", "Vie", "Sáb", "Dom"]
+            fig_cal.update_layout(
+                title=f"📅 Calendario {mes_global} (Click para filtrar)",
+                xaxis=dict(
+                    tickmode='array',
+                    tickvals=[0,1,2,3,4,5,6],
+                    ticktext=dias_semana,
+                    side='top',
+                    showgrid=False,
+                    zeroline=False
+                ),
+                yaxis=dict(
+                    autorange="reversed",
+                    showgrid=False,
+                    zeroline=False,
+                    showticklabels=False
+                ),
+                height=300,
+                margin=dict(l=10, r=10, t=30, b=10),
+                clickmode='event+select'
+            )
+            
+            # CAPTURAR SELECCIÓN
+            selected_points = st.plotly_chart(fig_cal, on_select="rerun", selection_mode="points", use_container_width=True)
+            
+            # APLICAR FILTRO
+            dia_filtro = None
+            if selected_points and len(selected_points["selection"]["points"]) > 0:
+                pt = selected_points["selection"]["points"][0]
+                # Recuperar el día desde el texto del punto
+                try:
+                    dia_filtro = int(pt["text"])
+                    st.info(f"🔎 Filtrando por: **{dia_filtro} de {mes_nombre}** (Haz doble clic en el calendario para borrar filtro)")
+                    df_mes = df_mes[pd.to_datetime(df_mes['fecha_pago']).dt.day == dia_filtro]
+                except: pass
+                
+        except Exception as e:
+            st.error(f"Error calendario: {e}")
+
         # GRAFICOS
         df_mes_graf = df_mes.copy()
         df_mes_graf['m_ars_v'] = df_mes_graf.apply(lambda x: x['monto'] * dolar_val if x['moneda'] == 'USD' else x['monto'], axis=1)
@@ -437,7 +528,6 @@ with tab1:
 
         cols_show = ["estado", "tipo_gasto", "monto_visual", "cuota", "forma_pago", "fecha_pago", "pagado"]
         
-        # DEFINICIÓN CORRECTA DE COLUMN CONFIG
         col_cfg = {
             "estado": st.column_config.TextColumn("✅", width="small"),
             "tipo_gasto": st.column_config.TextColumn("CONCEPTO"),
@@ -447,7 +537,6 @@ with tab1:
             "fecha_pago": st.column_config.DateColumn("FECHA PAGO", format="DD/MM/YYYY", width="medium"),
         }
 
-        # Estilo para pintar de verde
         def estilo_pagados(row):
             color = 'background-color: #1c3323' if row['pagado'] else ''
             return [color] * len(row)
@@ -468,16 +557,15 @@ with tab1:
                         st.subheader(f"📂 {grp}")
                         df_grp = df_tipo[df_tipo['grupo'] == grp]
                         
-                        # APLICAR ESTILO
                         styled_df = df_grp[cols_show].style.apply(estilo_pagados, axis=1)
-                        
+                        styled_df.hide(axis="columns", subset=["pagado"])
+
                         selection = st.dataframe(
                             styled_df,
                             column_config=col_cfg, 
                             use_container_width=True, 
                             hide_index=True, 
                             on_select="rerun", 
-                            column_order=["estado", "tipo_gasto", "monto_visual", "cuota", "forma_pago", "fecha_pago"], # ORDEN EXPLICITO EXCLUYE 'pagado'
                             selection_mode="multi-row",
                             key=f"tbl_{gran_tipo}_{grp}_{mes_global}"
                         )
@@ -557,7 +645,7 @@ with tab1:
             with c_mass_2:
                 new_mass_payment = st.selectbox("Nueva Forma de Pago", OPCIONES_PAGO)
             with c_mass_3:
-                mark_paid = st.checkbox("✅ Marcar TODOS como pagados")
+                mark_paid = st.checkbox("✅ MARCAR TODOS COMO PAGADOS")
             with c_mass_4:
                 st.write("") 
                 st.write("") 
