@@ -1,51 +1,71 @@
-# 🚀 Smart Finance Pro 2026
+# 💰 CONTABILIDAD PERSONAL V3
 
-**Smart Finance Pro 2026** es una plataforma de gestión financiera personal desarrollada en Python y Streamlit, diseñada específicamente para el contexto económico de Argentina. Esta herramienta permite centralizar el control de ingresos, gastos y ahorros, con un enfoque especial en la planificación de proyectos a largo plazo, como la construcción y equipamiento de una vivienda.
+Aplicación web integral para la gestión de finanzas personales, control de gastos, ingresos, deudas y proyección financiera. Desarrollada en Python con Streamlit y PostgreSQL.
 
-## 📋 Características Principales
+## ✨ Características Principales
 
-* **Dashboard Analítico:** Visualización en tiempo real del saldo proyectado y patrimonio acumulado mensual.
-* **Integración Dólar Blue:** Consumo automático de API para obtener cotizaciones actualizadas (Compra/Venta) y conversión instantánea de activos.
-* **Lógica de Ahorro Argentina:** El sistema trata los ahorros como capital positivo que suma al saldo proyectado, ideal para previsiones de fondos de inversión o plazos fijos.
-* **Gestión de Obra:** Estructura preparada para el seguimiento detallado de insumos de construcción (bombas presurizadoras, biodigestores, grifería inteligente).
-* **UX/UI Profesional:** Interfaz optimizada con gráficos interactivos de **Plotly** y tablas de edición dinámica con validación de datos (Selectbox).
-* **Importación Masiva:** Módulo para migrar datos históricos desde Excel de forma transparente.
+### 📊 1. Dashboard Interactivo
+* **KPIs en Tiempo Real:** Visualización inmediata de Resultados (ARS/USD) y Patrimonio Total.
+* **Calendario de Mapa de Calor:** Vista mensual interactiva. Los días se oscurecen según la intensidad del gasto. Al hacer clic en un día, se filtran los movimientos de esa fecha.
+* **Gráficos Dinámicos:**
+    * Distribución de gastos por Grupo (Torta).
+    * Gastos por Forma de Pago (Barras).
+    * Flujo de caja en Pesos y Dólares (Barras comparativas Ingreso vs Gasto).
+* **Listado Detallado:** Tabla jerárquica con semáforos de estado (✅/⏳) y checkbox para marcar "Pagado" rápidamente.
 
-## 🛠️ Stack Tecnológico
+### 📝 2. Gestión de Movimientos
+* **CRUD Completo:** Carga, edición y eliminación de registros.
+* **Campos Avanzados:** Concepto, **Cuenta o Contrato**, Grupo, Cuotas (actual/total), Moneda (ARS/USD), Forma de Pago.
+* **Lógica de Cuotas:** Al cargar una compra en cuotas (ej. 1/12), el sistema proyecta y crea automáticamente los registros futuros en los meses siguientes.
+* **Automatizaciones:**
+    * Cálculo automático de salarios (basado en lógica SMVM).
+    * Actualización automática de valores de activos (ej. Terreno).
+    * Actualización en cascada de "Ahorro Mes Anterior".
 
-* **Frontend/UI:** Streamlit (Python).
-* **Visualización:** Plotly Express.
-* **Base de Datos:** SQLite (Arquitectura local con motor de rescate de datos).
-* **Procesamiento de Datos:** Pandas / Openpyxl.
-* **API:** DolarAPI (Integración financiera).
+### 📉 3. Gestión de Deudas
+* Módulo específico para registrar deudas totales.
+* Registro de pagos parciales que impactan automáticamente en el flujo de caja mensual.
+* Barra de progreso visual del pago de la deuda.
+* Historial de pagos parciales.
 
-## 📥 Instalación y Configuración
+### 🔮 4. Predicciones con IA
+* Uso de **Regresión Lineal (Scikit-Learn)** para proyectar gastos futuros basándose en el historial de meses anteriores.
 
-1. **Clonar el repositorio:**
+### ⚙️ 5. Configuración y Seguridad
+* **Login:** Sistema de autenticación simple con usuario y contraseña hasheada.
+* **Backups:**
+    * Generación de **SQL Dump** completo (estructura + datos) compatible con migraciones.
+    * Exportación a CSV (Excel).
+* **Restauración:** Herramienta para restaurar base de datos y corregir secuencias de IDs automáticamente.
+* **Notificaciones:** Envío de **Emails automáticos** (vía Gmail SMTP) cada vez que se agrega, edita o paga un movimiento.
+
+---
+
+## 🛠️ Tecnologías Utilizadas
+
+* **Frontend:** [Streamlit](https://streamlit.io/)
+* **Base de Datos:** PostgreSQL
+* **Visualización:** Plotly Express / Graph Objects
+* **Ciencia de Datos:** Pandas, Scikit-Learn, Numpy
+* **Backend/Logic:** Python 3.x
+
+---
+
+## 🚀 Puesta en Marcha (Instalación Local)
+
+Sigue estos pasos para ejecutar la aplicación en tu computadora:
+
+### 1. Requisitos Previos
+* Tener instalado **Python 3.8+**.
+* Tener instalado **PostgreSQL** y **pgAdmin 4**.
+
+### 2. Configurar la Base de Datos
+1.  Abre pgAdmin 4.
+2.  Crea una nueva base de datos (ej: `contabilidad_local`).
+3.  No necesitas crear tablas, la aplicación las crea automáticamente al iniciar (`init_db`).
+
+### 3. Instalación de Dependencias
+Abre tu terminal en la carpeta del proyecto y ejecuta:
+
 ```bash
-git clone https://github.com/tu-usuario/smart-finance-2026.git
-cd smart-finance-2026
-
-```
-
-
-2. **Crear ambiente virtual (Recomendado):**
-```bash
-python -m venv .venv
-source .venv/bin/activate  # En Windows: .venv\Scripts\activate
-
-```
-
-
-3. **Instalar dependencias:**
-```bash
-pip install streamlit pandas plotly openpyxl requests
-
-```
-
-
-4. **Ejecutar la aplicación:**
-```bash
-streamlit run app.py
-
-```
+pip install streamlit pandas psycopg2-binary requests plotly python-dotenv scikit-learn streamlit-lottie
