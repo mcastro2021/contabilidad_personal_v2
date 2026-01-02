@@ -11,7 +11,8 @@ from streamlit_lottie import st_lottie
 from dotenv import load_dotenv
 import numpy as np
 from sklearn.linear_model import LinearRegression 
-import calendar
+from openai import OpenAI
+import io
 
 # --- CARGAR VARIABLES ---
 load_dotenv()
@@ -98,7 +99,7 @@ def init_db():
                   tipo TEXT, grupo TEXT, tipo_gasto TEXT, cuota TEXT, monto REAL, moneda TEXT,
                   forma_pago TEXT, fecha_pago TEXT)''')
     
-    # --- MIGRACIÓN AUTOMÁTICA: AGREGAR COLUMNA PAGADO ---
+    # MIGRACIÓN AUTOMÁTICA: AGREGAR COLUMNA PAGADO
     try:
         c.execute("ALTER TABLE movimientos ADD COLUMN pagado BOOLEAN DEFAULT FALSE")
         conn.commit()
@@ -125,6 +126,48 @@ def init_db():
     conn.close()
 
 init_db()
+
+# --- GENERADOR DE BACKUP SQL ---
+def generar_backup_sql():
+    """Genera un script SQL con INSERTs para todas las tablas"""
+    try:
+        conn = get_db_connection()
+        c = conn.cursor()
+        
+        # Orden importante: primero tablas sin dependencias (aunque aqui no hay FK estrictas)
+        tablas = ['users', 'grupos', 'deudas', 'movimientos']
+        script_sql = "-- BACKUP SMART FINANCE PRO\n-- Generado automáticamente\n\n"
+        
+        for tabla in tablas:
+            script_sql += f"-- DATOS DE TABLA: {tabla}\n"
+            
+            # Obtener columnas
+            c.execute(f"SELECT * FROM {tabla} LIMIT 0")
+            colnames = [desc[0] for desc in c.description]
+            col_str = ", ".join(colnames)
+            
+            # Obtener datos
+            c.execute(f"SELECT * FROM {tabla}")
+            rows = c.fetchall()
+            
+            for row in rows:
+                vals = []
+                for v in row:
+                    if v is None: vals.append("NULL")
+                    elif isinstance(v, str): vals.append(f"'{v.replace("'", "''")}'") # Escape simple quote
+                    elif isinstance(v, (datetime.date, datetime.datetime)): vals.append(f"'{v}'")
+                    elif isinstance(v, bool): vals.append("TRUE" if v else "FALSE")
+                    else: vals.append(str(v))
+                
+                val_str = ", ".join(vals)
+                script_sql += f"INSERT INTO {tabla} ({col_str}) VALUES ({val_str});\n"
+            
+            script_sql += "\n"
+            
+        conn.close()
+        return script_sql
+    except Exception as e:
+        return f"-- Error generando backup: {e}"
 
 # --- LÓGICA AUTOMÁTICA SALARIO CHICOS ---
 
@@ -399,112 +442,15 @@ with tab1:
         
         st.divider()
 
-        # --- CALENDARIO INTERACTIVO ---
-        try:
-            mes_nombre, anio_num = mes_global.split(" ")
-            anio_val = int(anio_num)
-            meses_dict = {"Enero":1,"Febrero":2,"Marzo":3,"Abril":4,"Mayo":5,"Junio":6,"Julio":7,"Agosto":8,"Septiembre":9,"Octubre":10,"Noviembre":11,"Diciembre":12}
-            mes_val = meses_dict.get(mes_nombre, 1)
-            
-            _, num_dias = calendar.monthrange(anio_val, mes_val)
-            fechas_mes = [datetime.date(anio_val, mes_val, d) for d in range(1, num_dias+1)]
-            
-            # Agrupar datos por fecha
-            df_cal = df_mes.copy()
-            df_cal['fecha_dt'] = pd.to_datetime(df_cal['fecha_pago']).dt.date
-            
-            # Crear dataframe para el calendario
-            cal_data = []
-            for f in fechas_mes:
-                monto_dia = df_cal[df_cal['fecha_dt'] == f]['monto'].sum()
-                cal_data.append({
-                    "Fecha": f,
-                    "Dia": f.day,
-                    "Semana": int(f.strftime("%U")), # Semana del año para Y
-                    "DiaSemana": f.weekday(), # 0=Lunes
-                    "Monto": monto_dia,
-                    "Color": monto_dia if monto_dia > 0 else 0
-                })
-            
-            df_calendar = pd.DataFrame(cal_data)
-            
-            # Normalizar semanas para que la primera semana del mes sea 0 (arriba)
-            min_sem = df_calendar['Semana'].min()
-            df_calendar['SemanaRel'] = df_calendar['Semana'] - min_sem
-            
-            fig_cal = go.Figure(data=go.Scatter(
-                x=df_calendar['DiaSemana'],
-                y=df_calendar['SemanaRel'],
-                text=df_calendar['Dia'],
-                mode='markers+text',
-                marker=dict(
-                    size=40,
-                    symbol='square',
-                    color=df_calendar['Color'],
-                    colorscale='Greens',
-                    showscale=False,
-                    line=dict(width=1, color='DarkSlateGrey')
-                ),
-                textfont=dict(color='black', size=14, family="Arial Black"),
-                hoverinfo='text',
-                hovertext=[f"Día {r.Dia}: ${r.Monto:,.0f}" for i, r in df_calendar.iterrows()]
-            ))
-            
-            dias_semana = ["Lun", "Mar", "Mié", "Jue", "Vie", "Sáb", "Dom"]
-            fig_cal.update_layout(
-                title=f"📅 Calendario {mes_global} (Click para filtrar)",
-                xaxis=dict(
-                    tickmode='array',
-                    tickvals=[0,1,2,3,4,5,6],
-                    ticktext=dias_semana,
-                    side='top',
-                    showgrid=False,
-                    zeroline=False
-                ),
-                yaxis=dict(
-                    autorange="reversed",
-                    showgrid=False,
-                    zeroline=False,
-                    showticklabels=False
-                ),
-                height=300,
-                margin=dict(l=10, r=10, t=30, b=10),
-                clickmode='event+select'
-            )
-            
-            # CAPTURAR SELECCIÓN
-            selected_points = st.plotly_chart(fig_cal, on_select="rerun", selection_mode="points", use_container_width=True)
-            
-            # APLICAR FILTRO
-            dia_filtro = None
-            if selected_points and len(selected_points["selection"]["points"]) > 0:
-                pt = selected_points["selection"]["points"][0]
-                # Recuperar el día desde el texto del punto
-                try:
-                    dia_filtro = int(pt["text"])
-                    st.info(f"🔎 Filtrando por: **{dia_filtro} de {mes_nombre}** (Haz doble clic en el calendario para borrar filtro)")
-                    df_mes = df_mes[pd.to_datetime(df_mes['fecha_pago']).dt.day == dia_filtro]
-                except: pass
-                
-        except Exception as e:
-            st.error(f"Error calendario: {e}")
-
         # GRAFICOS
         df_mes_graf = df_mes.copy()
         df_mes_graf['m_ars_v'] = df_mes_graf.apply(lambda x: x['monto'] * dolar_val if x['moneda'] == 'USD' else x['monto'], axis=1)
         
-        c_graf_1, c_graf_2 = st.columns(2)
-        with c_graf_1:
+        col_pie, col_ars, col_usd = st.columns(3)
+        with col_pie:
             st.caption("Distribución de Gastos")
             if not df_mes_graf[df_mes_graf['tipo']=="GASTO"].empty:
                 st.plotly_chart(px.pie(df_mes_graf[df_mes_graf['tipo']=="GASTO"], values='m_ars_v', names='grupo', hole=0.4), use_container_width=True)
-        with c_graf_2:
-            st.caption("Gastos por Forma de Pago")
-            df_fp = df_mes_graf[df_mes_graf['tipo']=="GASTO"].groupby('forma_pago')['m_ars_v'].sum().reset_index()
-            if not df_fp.empty:
-                st.plotly_chart(px.bar(df_fp, x='forma_pago', y='m_ars_v', color='forma_pago'), use_container_width=True)
-
-        col_ars, col_usd = st.columns(2)
         with col_ars:
             st.caption("Flujo Pesos")
             if not df_mes_graf[df_mes_graf['moneda']=="ARS"].empty:
@@ -529,7 +475,7 @@ with tab1:
         cols_show = ["estado", "tipo_gasto", "monto_visual", "cuota", "forma_pago", "fecha_pago", "pagado"]
         
         col_cfg = {
-            "estado": st.column_config.TextColumn("✅", width="small"),
+            "estado": st.column_config.TextColumn("EST", width="small"),
             "tipo_gasto": st.column_config.TextColumn("CONCEPTO"),
             "monto_visual": st.column_config.TextColumn("MONTO", width="medium"),
             "cuota": st.column_config.TextColumn("CUOTA", width="small"),
@@ -645,7 +591,7 @@ with tab1:
             with c_mass_2:
                 new_mass_payment = st.selectbox("Nueva Forma de Pago", OPCIONES_PAGO)
             with c_mass_3:
-                mark_paid = st.checkbox("✅ MARCAR TODOS COMO PAGADOS")
+                mark_paid = st.checkbox("✅ Marcar TODOS como pagados")
             with c_mass_4:
                 st.write("") 
                 st.write("") 
@@ -707,6 +653,25 @@ with tab2: # PREDICCIONES
 
 with tab3: # CONFIG
     st.header("⚙️ Configuración")
+    
+    st.markdown("### 💾 EXPORTAR DATOS")
+    conn = get_db_connection()
+    c = conn.cursor()
+    # CSVs
+    csv_mov = pd.read_sql("SELECT * FROM movimientos", conn).to_csv(index=False).encode('utf-8')
+    csv_deu = pd.read_sql("SELECT * FROM deudas", conn).to_csv(index=False).encode('utf-8')
+    
+    # SQL Backup
+    script_sql = generar_backup_sql()
+    
+    conn.close()
+    
+    c1, c2, c3 = st.columns(3)
+    c1.download_button("📥 Descargar Movimientos (CSV)", csv_mov, "movimientos.csv", "text/csv")
+    c2.download_button("📥 Descargar Deudas (CSV)", csv_deu, "deudas.csv", "text/csv")
+    c3.download_button("📥 Descargar Backup Completo (.sql)", script_sql, "backup_finance.sql", "text/plain")
+
+    st.divider()
     
     st.markdown("### 📤 MIGRACIÓN")
     archivo_db = st.file_uploader("Archivo .db", type=["db", "sqlite", "sqlite3"])
