@@ -92,7 +92,6 @@ def init_db():
     except: conn.rollback() 
     try: c.execute("ALTER TABLE movimientos ADD COLUMN contrato TEXT DEFAULT ''"); conn.commit()
     except: conn.rollback()
-    
     c.execute('''CREATE TABLE IF NOT EXISTS grupos (nombre TEXT PRIMARY KEY)''')
     c.execute('''CREATE TABLE IF NOT EXISTS users (username TEXT PRIMARY KEY, password TEXT)''')
     c.execute('''CREATE TABLE IF NOT EXISTS deudas (id SERIAL PRIMARY KEY, nombre_deuda TEXT, monto_total REAL, moneda TEXT, fecha_inicio TEXT, estado TEXT)''')
@@ -209,7 +208,8 @@ def actualizar_saldos_en_cascada(mes_modificado):
 def get_dolar():
     try:
         r = requests.get("https://dolarapi.com/v1/dolares/blue", timeout=3).json()
-        return (float(r['compra']) + float(r['venta'])) / 2, f"(Venta: ${int(r['venta'])})"
+        # MODIFICADO AQUI: Texto completo
+        return (float(r['compra']) + float(r['venta'])) / 2, f"(Compra: ${int(r['compra'])} | Venta: ${int(r['venta'])})"
     except: return 1480.0, "(Ref)"
 
 # --- LOGIN ---
@@ -259,10 +259,9 @@ with st.sidebar.form("alta"):
     t_sel = st.selectbox("TIPO", ["GASTO", "GANANCIA"])
     g_sel = st.selectbox("GRUPO", grupos_db)
     
-    # CAMBIO DE NOMBRE EN ETIQUETA
     c_con, c_cont = st.columns(2)
     concepto = c_con.text_input("CONCEPTO")
-    contrato = c_cont.text_input("CUENTA O CONTRATO") # CAMBIO AQUI
+    contrato = c_cont.text_input("CUENTA O CONTRATO")
     
     c1, c2 = st.columns(2)
     c_act = c1.number_input("Cuota", 1, 300, 1)
@@ -388,7 +387,7 @@ with tab1:
         col_cfg = {
             "estado": st.column_config.TextColumn("✅", width="small"),
             "tipo_gasto": st.column_config.TextColumn("CONCEPTO"),
-            "contrato": st.column_config.TextColumn("CUENTA O CONTRATO"), # CAMBIO AQUI
+            "contrato": st.column_config.TextColumn("CUENTA O CONTRATO"), 
             "monto_visual": st.column_config.TextColumn("MONTO", width="medium"),
             "cuota": st.column_config.TextColumn("CUOTA", width="small"),
             "forma_pago": st.column_config.TextColumn("FORMA PAGO", width="medium"),
@@ -425,10 +424,12 @@ with tab1:
                 nT = c1.selectbox("Tipo", ["GASTO", "GANANCIA"], index=["GASTO", "GANANCIA"].index(row['tipo']))
                 nG = c2.selectbox("Grupo", grupos_db, index=grupos_db.index(row['grupo']) if row['grupo'] in grupos_db else 0)
                 nC = c3.text_input("Concepto", value=row['tipo_gasto'])
-                nCont = c4.text_input("Cuenta o Contrato", value=row['contrato'] if row['contrato'] else "") # CAMBIO AQUI
+                nCont = c4.text_input("Cuenta o Contrato", value=row['contrato'] if row['contrato'] else "") 
                 
                 c5, c6, c7 = st.columns(3)
-                nM = c5.text_input("Monto", value=str(row['monto']))
+                val_m = str(row['monto']).replace('.', ',')
+                nM = c5.text_input("Monto", value=val_m)
+                
                 nMon = c6.selectbox("Moneda", ["ARS", "USD"], index=["ARS", "USD"].index(row['moneda']))
                 nCuo = c7.text_input("Cuota", value=str(row['cuota']))
                 
