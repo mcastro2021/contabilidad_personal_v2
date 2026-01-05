@@ -9,21 +9,27 @@ import plotly.graph_objects as go
 import hashlib
 from streamlit_lottie import st_lottie
 from dotenv import load_dotenv
-import numpy as np
 from sklearn.linear_model import LinearRegression 
 import smtplib
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
-import io
-import sqlite3
-import tempfile
 import calendar
+import logging
+
+# --- CONFIGURACIÓN DE LOGGING (PRODUCCIÓN) ---
+# Esto permite ver los errores en la consola de Render/Docker sin ensuciar la UI
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    handlers=[logging.StreamHandler()]
+)
+logger = logging.getLogger(__name__)
 
 # --- CARGAR VARIABLES ---
 load_dotenv()
 
-# --- CONFIGURACIÓN ---
-st.set_page_config(page_title="CONTABILIDAD PERSONAL V3", layout="wide")
+# --- CONFIGURACIÓN DE PÁGINA ---
+st.set_page_config(page_title="CONTABILIDAD PERSONAL V4", layout="wide")
 
 # --- EMAIL NOTIFICACIONES ---
 def enviar_notificacion(asunto, mensaje):
@@ -32,15 +38,25 @@ def enviar_notificacion(asunto, mensaje):
         sender_password = os.environ.get("EMAIL_PASSWORD")
         receiver_email = os.environ.get("EMAIL_RECEIVER")
 
-        if not all([sender_email, sender_password, receiver_email]): return 
+        if not all([sender_email, sender_password, receiver_email]): 
+            logger.warning("Credenciales de email incompletas. No se envió notificación.")
+            return 
 
         msg = MIMEMultipart()
-        msg['From'] = sender_email; msg['To'] = receiver_email; msg['Subject'] = f"🔔 CONTABILIDAD PERSONAL V3: {asunto}"
+        msg['From'] = sender_email
+        msg['To'] = receiver_email
+        msg['Subject'] = f"🔔 FINANZAS V4: {asunto}"
         msg.attach(MIMEText(mensaje, 'plain'))
-        server = smtplib.SMTP('smtp.gmail.com', 587); server.starttls()
+        
+        server = smtplib.SMTP('smtp.gmail.com', 587)
+        server.starttls()
         server.login(sender_email, sender_password)
-        server.sendmail(sender_email, receiver_email, msg.as_string()); server.quit()
-    except: pass
+        server.sendmail(sender_email, receiver_email, msg.as_string())
+        server.quit()
+        logger.info(f"Email enviado: {asunto}")
+    except Exception as e:
+        # Logueamos el error pero no interrumpimos la app
+        logger.error(f"Fallo al enviar email: {e}")
 
 # --- GENERADOR DE MESES ---
 def generar_lista_meses(start_year=2026, end_year=2035):
@@ -56,20 +72,29 @@ SMVM_BASE_2026 = {"Enero 2026": 341000.0, "Febrero 2026": 346800.0, "Marzo 2026"
 
 # --- FUNCIONES AUXILIARES ---
 def load_lottieurl(url):
-    try: return requests.get(url).json()
-    except: return None
+    try: 
+        response = requests.get(url, timeout=3)
+        if response.status_code != 200: return None
+        return response.json()
+    except Exception as e:
+        logger.warning(f"No se pudo cargar Lottie: {e}")
+        return None
 
 LOTTIE_FINANCE = "https://lottie.host/02a55953-2736-4763-b183-116515b81045/L1O1fW89yB.json" 
 
-def make_hashes(password): return hashlib.sha256(str.encode(password)).hexdigest()
-def check_hashes(password, hashed_text): return make_hashes(password) == hashed_text
+def make_hashes(password):
+    return hashlib.sha256(str.encode(password)).hexdigest()
+
+def check_hashes(password, hashed_text):
+    return make_hashes(password) == hashed_text
 
 def formato_moneda_visual(valor, moneda):
     if valor is None or pd.isna(valor): return ""
     try:
         num = float(valor)
         s = f"{num:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
-        return f"{'US$ ' if moneda == 'USD' else '$ '}{s}"
+        prefijo = "US$ " if moneda == "USD" else "$ "
+        return f"{prefijo}{s}"
     except: return str(valor)
 
 def procesar_monto_input(texto):
@@ -77,31 +102,72 @@ def procesar_monto_input(texto):
     try:
         if isinstance(texto, (int, float)): return float(texto)
         t = str(texto).strip().replace("$", "").replace("US", "").replace(" ", "")
+        # Elimina puntos de mil y cambia coma decimal por punto
         return float(t.replace(".", "").replace(",", "."))
-    except: return 0.0
+    except Exception as e:
+        logger.error(f"Error procesando monto '{texto}': {e}")
+        return 0.0
 
 # --- BASE DE DATOS ---
 def get_db_connection():
-    try: return psycopg2.connect(os.environ.get('DATABASE_URL'))
-    except Exception as e: st.error(f"Error DB: {e}"); st.stop()
+    try: 
+        db_url = os.environ.get('DATABASE_URL')
+        if not db_url:
+            logger.critical("DATABASE_URL no encontrada en variables de entorno.")
+            st.error("❌ Error de configuración del servidor (DB URL missing).")
+            st.stop()
+        return psycopg2.connect(db_url)
+    except Exception as e: 
+        logger.critical(f"No se pudo conectar a la base de datos: {e}")
+        st.error("❌ Error de conexión a la base de datos.")
+        st.stop()
 
 def init_db():
-    conn = get_db_connection(); c = conn.cursor()
-    c.execute('''CREATE TABLE IF NOT EXISTS movimientos (id SERIAL PRIMARY KEY, fecha TEXT, mes TEXT, tipo TEXT, grupo TEXT, tipo_gasto TEXT, cuota TEXT, monto REAL, moneda TEXT, forma_pago TEXT, fecha_pago TEXT)''')
-    try: c.execute("ALTER TABLE movimientos ADD COLUMN pagado BOOLEAN DEFAULT FALSE"); conn.commit()
-    except: conn.rollback() 
-    try: c.execute("ALTER TABLE movimientos ADD COLUMN contrato TEXT DEFAULT ''"); conn.commit()
-    except: conn.rollback()
-    c.execute('''CREATE TABLE IF NOT EXISTS grupos (nombre TEXT PRIMARY KEY)''')
-    c.execute('''CREATE TABLE IF NOT EXISTS users (username TEXT PRIMARY KEY, password TEXT)''')
-    c.execute('''CREATE TABLE IF NOT EXISTS deudas (id SERIAL PRIMARY KEY, nombre_deuda TEXT, monto_total REAL, moneda TEXT, fecha_inicio TEXT, estado TEXT)''')
-    
-    c.execute("SELECT count(*) FROM grupos")
-    if c.fetchone()[0] == 0: c.executemany("INSERT INTO grupos VALUES (%s) ON CONFLICT DO NOTHING", [("AHORRO MANUEL",), ("CASA",), ("AUTO",), ("VARIOS",), ("DEUDAS",)])
-    
-    c.execute("SELECT count(*) FROM users")
-    if c.fetchone()[0] == 0: c.execute("INSERT INTO users VALUES (%s, %s) ON CONFLICT DO NOTHING", ("admin", make_hashes("admin123")))
-    conn.commit(); conn.close()
+    try:
+        conn = get_db_connection(); c = conn.cursor()
+        # TABLA MOVIMIENTOS
+        c.execute('''CREATE TABLE IF NOT EXISTS movimientos (id SERIAL PRIMARY KEY, fecha TEXT, mes TEXT, tipo TEXT, grupo TEXT, tipo_gasto TEXT, cuota TEXT, monto REAL, moneda TEXT, forma_pago TEXT, fecha_pago TEXT)''')
+        
+        # MIGRACIONES (Columnas nuevas)
+        try: 
+            c.execute("ALTER TABLE movimientos ADD COLUMN pagado BOOLEAN DEFAULT FALSE")
+            conn.commit()
+        except: conn.rollback() 
+        
+        try: 
+            c.execute("ALTER TABLE movimientos ADD COLUMN contrato TEXT DEFAULT ''")
+            conn.commit()
+        except: conn.rollback()
+        
+        # TABLAS AUXILIARES
+        c.execute('''CREATE TABLE IF NOT EXISTS grupos (nombre TEXT PRIMARY KEY)''')
+        c.execute('''CREATE TABLE IF NOT EXISTS users (username TEXT PRIMARY KEY, password TEXT)''')
+        c.execute('''CREATE TABLE IF NOT EXISTS deudas (id SERIAL PRIMARY KEY, nombre_deuda TEXT, monto_total REAL, moneda TEXT, fecha_inicio TEXT, estado TEXT)''')
+        
+        # NUEVA TABLA INVERSIONES
+        c.execute('''CREATE TABLE IF NOT EXISTS inversiones (
+            id SERIAL PRIMARY KEY, 
+            tipo TEXT, 
+            entidad TEXT, 
+            monto_inicial REAL, 
+            tna REAL, 
+            fecha_inicio TEXT, 
+            plazo_dias INTEGER, 
+            estado TEXT
+        )''')
+
+        # DATOS INICIALES
+        c.execute("SELECT count(*) FROM grupos")
+        if c.fetchone()[0] == 0: 
+            c.executemany("INSERT INTO grupos VALUES (%s) ON CONFLICT DO NOTHING", [("AHORRO MANUEL",), ("CASA",), ("AUTO",), ("VARIOS",), ("DEUDAS",)])
+        
+        c.execute("SELECT count(*) FROM users")
+        if c.fetchone()[0] == 0: 
+            c.execute("INSERT INTO users VALUES (%s, %s) ON CONFLICT DO NOTHING", ("admin", make_hashes("admin123")))
+        
+        conn.commit(); conn.close()
+    except Exception as e:
+        logger.critical(f"Error inicializando DB: {e}")
 
 init_db()
 
@@ -109,8 +175,8 @@ init_db()
 def generar_backup_sql():
     try:
         conn = get_db_connection(); c = conn.cursor()
-        tablas = ['grupos', 'users', 'deudas', 'movimientos']
-        script = "-- BACKUP CONTABILIDAD PERSONAL V3 --\nTRUNCATE TABLE movimientos, deudas, grupos, users RESTART IDENTITY CASCADE;\n\n"
+        tablas = ['grupos', 'users', 'deudas', 'movimientos', 'inversiones']
+        script = "-- BACKUP CONTABILIDAD PERSONAL V4 --\nTRUNCATE TABLE movimientos, deudas, grupos, users, inversiones RESTART IDENTITY CASCADE;\n\n"
         for tabla in tablas:
             c.execute(f"SELECT * FROM {tabla}")
             rows = c.fetchall()
@@ -126,11 +192,13 @@ def generar_backup_sql():
                     else: vals.append(str(v))
                 cols_str = ", ".join(colnames); vals_str = ", ".join(vals)
                 script += f"INSERT INTO {tabla} ({cols_str}) VALUES ({vals_str}) ON CONFLICT DO NOTHING;\n"
-        script += "\nSELECT setval('movimientos_id_seq', (SELECT MAX(id) FROM movimientos));\nSELECT setval('deudas_id_seq', (SELECT MAX(id) FROM deudas));\n"
+        script += "\nSELECT setval('movimientos_id_seq', (SELECT MAX(id) FROM movimientos));\nSELECT setval('deudas_id_seq', (SELECT MAX(id) FROM deudas));\nSELECT setval('inversiones_id_seq', (SELECT MAX(id) FROM inversiones));\n"
         conn.close(); return script
-    except Exception as e: return f"-- ERROR: {e}"
+    except Exception as e: 
+        logger.error(f"Error generando backup: {e}")
+        return f"-- ERROR: {e}"
 
-# --- LÓGICA ---
+# --- LÓGICA AUTOMÁTICA ---
 def calcular_monto_salario_mes(mes_str):
     if mes_str in SMVM_BASE_2026:
         base = SMVM_BASE_2026[mes_str]; monto = base * 2.5
@@ -157,7 +225,8 @@ def ejecutar_actualizacion_automatica_salarios():
             val = calcular_monto_salario_mes(reg[1])
             if val: c.execute("UPDATE movimientos SET monto = %s WHERE id = %s", (val, reg[0]))
         conn.commit(); conn.close()
-    except: pass
+    except Exception as e:
+        logger.error(f"Fallo actualización automática salarios: {e}")
 
 def ejecutar_actualizacion_automatica_terreno():
     try:
@@ -166,7 +235,8 @@ def ejecutar_actualizacion_automatica_terreno():
             val = 13800.0 * ((1 + 0.04) ** i)
             c.execute("""UPDATE movimientos SET monto = %s WHERE mes = %s AND tipo_gasto = 'TERRENO'""", (val, mes))
         conn.commit(); conn.close()
-    except: pass
+    except Exception as e:
+        logger.error(f"Fallo actualización automática terreno: {e}")
 
 def propagar_edicion_cuotas(mes_origen, concepto, contrato, grupo, monto, moneda, forma_pago, fecha_base, nueva_cuota_str):
     try:
@@ -185,7 +255,9 @@ def propagar_edicion_cuotas(mes_origen, concepto, contrato, grupo, monto, moneda
                 c.execute("""INSERT INTO movimientos (fecha, mes, tipo, grupo, tipo_gasto, contrato, cuota, monto, moneda, forma_pago, fecha_pago, pagado) VALUES (%s, %s, 'GASTO', %s, %s, %s, %s, %s, %s, %s, %s, FALSE)""", (str(datetime.date.today()), mf, grupo, concepto, contrato, cf, monto, moneda, forma_pago, fstr))
             cuota_num += 1
         conn.commit(); conn.close()
-    except: pass
+        logger.info(f"Cuotas propagadas para {concepto} desde {mes_origen}")
+    except Exception as e:
+        logger.error(f"Error propagando cuotas: {e}")
 
 def actualizar_saldos_en_cascada(mes_modificado):
     try:
@@ -202,15 +274,20 @@ def actualizar_saldos_en_cascada(mes_modificado):
             else: c.execute("INSERT INTO movimientos (fecha, mes, tipo, grupo, tipo_gasto, cuota, monto, moneda, forma_pago, fecha_pago) VALUES (%s,%s,'GANANCIA','AHORRO MANUEL','Ahorro Mes Anterior','1/1',%s,'ARS','Automático',%s)", (str(datetime.date.today()), ms, saldo, str(datetime.date.today())))
             conn.commit()
         conn.close()
-    except: pass
+    except Exception as e:
+        logger.error(f"Error en cascada de saldos: {e}")
 
 @st.cache_data(ttl=60)
 def get_dolar():
     try:
-        r = requests.get("https://dolarapi.com/v1/dolares/blue", timeout=3).json()
-        # MODIFICADO AQUI: Texto completo
-        return (float(r['compra']) + float(r['venta'])) / 2, f"(Compra: ${int(r['compra'])} | Venta: ${int(r['venta'])})"
-    except: return 1480.0, "(Ref)"
+        r = requests.get("https://dolarapi.com/v1/dolares/blue", timeout=3)
+        r.raise_for_status()
+        data = r.json()
+        # FORMATO SOLICITADO: (Compra: $xxx | Venta: $xxx)
+        return (float(data['compra']) + float(data['venta'])) / 2, f"(Compra: ${int(data['compra'])} | Venta: ${int(data['venta'])})"
+    except Exception as e:
+        logger.warning(f"Error API Dolar: {e}")
+        return 1480.0, "(Ref)"
 
 # --- LOGIN ---
 if 'logged_in' not in st.session_state: st.session_state['logged_in'] = False
@@ -227,8 +304,13 @@ def login_page():
             if st.form_submit_button("Entrar", use_container_width=True):
                 conn = get_db_connection(); c = conn.cursor()
                 c.execute("SELECT * FROM users WHERE username=%s AND password=%s", (u, make_hashes(p)))
-                if c.fetchall(): st.session_state['logged_in'] = True; st.session_state['username'] = u; st.rerun()
-                else: st.error("Error")
+                if c.fetchall(): 
+                    st.session_state['logged_in'] = True; st.session_state['username'] = u
+                    logger.info(f"Usuario {u} inició sesión.")
+                    st.rerun()
+                else: 
+                    st.error("Credenciales incorrectas")
+                    logger.warning(f"Intento fallido de login: {u}")
                 conn.close()
 
 if not st.session_state['logged_in']: login_page(); st.stop()
@@ -240,10 +322,12 @@ with st.sidebar:
     lottie = load_lottieurl(LOTTIE_FINANCE)
     if lottie: st_lottie(lottie, height=100)
     st.write(f"👤 **{st.session_state['username']}**")
-    if st.button("Salir"): st.session_state['logged_in'] = False; st.rerun()
+    if st.button("Salir"): 
+        logger.info(f"Usuario {st.session_state['username']} cerró sesión.")
+        st.session_state['logged_in'] = False; st.rerun()
 
 dolar_val, dolar_info = get_dolar()
-st.title("CONTABILIDAD PERSONAL V3")
+st.title("CONTABILIDAD PERSONAL V4")
 mes_global = st.selectbox("📅 MES DE TRABAJO:", LISTA_MESES_LARGA)
 
 ejecutar_actualizacion_automatica_salarios()
@@ -296,17 +380,17 @@ with st.sidebar.form("alta"):
                         (str(datetime.date.today()), mt, t_sel, g_sel, concepto, contrato, cstr, mg, mon_sel, f_pago, fv.strftime('%Y-%m-%d'), ep))
         conn.commit(); conn.close(); actualizar_saldos_en_cascada(mes_global)
         enviar_notificacion("Nuevo Movimiento", f"{concepto} - {contrato} - {m_final}")
+        logger.info(f"Movimiento creado: {concepto} ({m_final})")
         st.balloons(); st.success("Guardado"); st.rerun()
 
 # --- TABS ---
-tab1, tab2, tab3, tab4 = st.tabs(["📊 DASHBOARD", "🔮 PREDICCIONES", "⚙️ CONFIGURACIÓN", "📉 DEUDAS"])
+tab1, tab2, tab3, tab4, tab5 = st.tabs(["📊 DASHBOARD", "💰 INVERSIONES", "🔮 PREDICCIONES", "⚙️ CONFIGURACIÓN", "📉 DEUDAS"])
 
 with tab1:
     st.info(f"Dolar Blue: {formato_moneda_visual(dolar_val, 'ARS')} {dolar_info}")
     df_mes = df_all[df_all['mes'] == mes_global].copy()
     
     if not df_mes.empty:
-        # KPI
         res_ars = df_mes[(df_mes['moneda']=="ARS")&(df_mes['tipo']=="GANANCIA")]['monto'].sum() - df_mes[(df_mes['moneda']=="ARS")&(df_mes['tipo']=="GASTO")]['monto'].sum()
         res_usd = df_mes[(df_mes['moneda']=="USD")&(df_mes['tipo']=="GANANCIA")]['monto'].sum() - df_mes[(df_mes['moneda']=="USD")&(df_mes['tipo']=="GASTO")]['monto'].sum()
         pat = res_ars + (res_usd * dolar_val)
@@ -346,7 +430,8 @@ with tab1:
             if sel and sel["selection"]["points"]:
                 d = int(sel["selection"]["points"][0]["text"])
                 st.info(f"🔎 Día {d}"); df_mes = df_mes[pd.to_datetime(df_mes['fecha_pago']).dt.day == d]
-        except: pass
+        except Exception as e:
+            logger.warning(f"Error renderizando calendario: {e}")
 
         # GRAFICOS
         df_mes['m_ars_v'] = df_mes.apply(lambda x: x['monto'] * dolar_val if x['moneda'] == 'USD' else x['monto'], axis=1)
@@ -471,7 +556,90 @@ with tab1:
                 actualizar_saldos_en_cascada(mes_global); st.success("Eliminados"); st.rerun()
     else: st.info("Sin datos.")
 
-with tab2: # PREDICCIONES
+with tab2: # INVERSIONES (NUEVO)
+    st.header("💰 Gestión de Inversiones")
+    
+    # FORMULARIO ALTA
+    with st.expander("➕ NUEVA INVERSIÓN", expanded=False):
+        with st.form("nueva_inv"):
+            c1, c2, c3 = st.columns(3)
+            tipo_inv = c1.selectbox("Tipo", ["Plazo Fijo", "Billetera (FCI)"])
+            entidad = c2.text_input("Banco / Billetera", placeholder="Ej: Galicia, Personal Pay")
+            monto_inv = c3.text_input("Monto Inicial", "0,00")
+            c4, c5, c6 = st.columns(3)
+            tna_inv = c4.number_input("TNA Estimada (%)", 0.0, 200.0, 70.0)
+            fecha_inv = c5.date_input("Fecha Inicio", datetime.date.today())
+            plazo = c6.number_input("Plazo (Días - Solo PF)", 30, 365, 30) if tipo_inv == "Plazo Fijo" else 0
+            
+            if st.form_submit_button("CREAR INVERSIÓN"):
+                m_real = procesar_monto_input(monto_inv)
+                conn = get_db_connection(); c = conn.cursor()
+                c.execute("INSERT INTO inversiones (tipo, entidad, monto_inicial, tna, fecha_inicio, plazo_dias, estado) VALUES (%s,%s,%s,%s,%s,%s,'ACTIVA')", 
+                          (tipo_inv, entidad, m_real, tna_inv, str(fecha_inv), plazo))
+                conn.commit(); conn.close(); st.success("Inversión Creada"); st.rerun()
+
+    # LISTADO Y CÁLCULOS
+    conn = get_db_connection()
+    df_inv = pd.read_sql("SELECT * FROM inversiones WHERE estado='ACTIVA'", conn)
+    conn.close()
+    
+    if not df_inv.empty:
+        total_invertido = df_inv['monto_inicial'].sum()
+        ganancia_total_estimada = 0.0
+        
+        st.divider()
+        for index, row in df_inv.iterrows():
+            f_ini = pd.to_datetime(row['fecha_inicio']).date()
+            dias_transcurridos = (datetime.date.today() - f_ini).days
+            
+            # LÓGICA DE CÁLCULO
+            if row['tipo'] == "Plazo Fijo":
+                # Interés simple al final
+                interes_ganado = row['monto_inicial'] * (row['tna'] / 100) * (row['plazo_dias'] / 365)
+                total_final = row['monto_inicial'] + interes_ganado
+                # Progreso visual
+                progreso = min(dias_transcurridos / row['plazo_dias'], 1.0) if row['plazo_dias'] > 0 else 0
+                ganancia_al_momento = row['monto_inicial'] * (row['tna'] / 100) * (dias_transcurridos / 365) # Devengado teórico
+                
+                with st.container(border=True):
+                    c1, c2 = st.columns([3, 1])
+                    c1.markdown(f"**🏦 {row['entidad']} (Plazo Fijo)** - TNA: {row['tna']}%")
+                    c1.progress(progreso, text=f"Día {dias_transcurridos} de {row['plazo_dias']}")
+                    k1, k2, k3 = c1.columns(3)
+                    k1.metric("Capital", formato_moneda_visual(row['monto_inicial'], "ARS"))
+                    k2.metric("A cobrar", formato_moneda_visual(total_final, "ARS"))
+                    k3.metric("Vence", (f_ini + datetime.timedelta(days=row['plazo_dias'])).strftime('%d/%m/%Y'))
+                    
+                    if c2.button("Finalizar", key=f"fin_{row['id']}"):
+                        conn = get_db_connection(); c = conn.cursor()
+                        c.execute("UPDATE inversiones SET estado='FINALIZADA' WHERE id=%s", (row['id'],)); conn.commit(); conn.close(); st.rerun()
+                
+                ganancia_total_estimada += max(ganancia_al_momento, 0)
+
+            elif row['tipo'] == "Billetera (FCI)":
+                # Interés compuesto diario aproximado
+                tasa_diaria = (row['tna'] / 100) / 365
+                monto_actual = row['monto_inicial'] * ((1 + tasa_diaria) ** dias_transcurridos)
+                ganancia = monto_actual - row['monto_inicial']
+                ganancia_total_estimada += ganancia
+                
+                with st.container(border=True):
+                    c1, c2 = st.columns([3, 1])
+                    c1.markdown(f"**📱 {row['entidad']} (FCI/Wallet)** - TNA: {row['tna']}% (Crecimiento Automático)")
+                    k1, k2, k3 = c1.columns(3)
+                    k1.metric("Capital Inicial", formato_moneda_visual(row['monto_inicial'], "ARS"))
+                    k2.metric("Saldo HOY (Est.)", formato_moneda_visual(monto_actual, "ARS"), delta=formato_moneda_visual(ganancia, "ARS"))
+                    k3.metric("Días Operando", f"{dias_transcurridos} días")
+                    
+                    if c2.button("Retirar/Fin", key=f"fin_w_{row['id']}"):
+                        conn = get_db_connection(); c = conn.cursor()
+                        c.execute("UPDATE inversiones SET estado='FINALIZADA' WHERE id=%s", (row['id'],)); conn.commit(); conn.close(); st.rerun()
+
+        st.info(f"💰 Capital Total Invertido: {formato_moneda_visual(total_invertido, 'ARS')} | 📈 Interés Generado (Est.): {formato_moneda_visual(ganancia_total_estimada, 'ARS')}")
+    else:
+        st.info("No tienes inversiones activas.")
+
+with tab3: # PREDICCIONES
     st.header("🔮 Predicciones")
     df_ai = df_all[df_all['tipo'] == 'GASTO'].copy()
     if len(df_ai) > 0:
@@ -489,8 +657,52 @@ with tab2: # PREDICCIONES
             st.plotly_chart(fig, use_container_width=True)
     else: st.info("Faltan datos.")
 
-with tab3: # CONFIG
+with tab4: # CONFIGURACIÓN
     st.header("⚙️ Configuración")
+    
+    # --- AUTOMATIZACIÓN DE RECURRENTES (BOTÓN MÁGICO) ---
+    with st.expander("🔄 REPLICADOR DE GASTOS FIJOS (BOTÓN MÁGICO)", expanded=False):
+        st.markdown("Copia gastos fijos de un mes modelo a varios meses futuros.")
+        c1, c2 = st.columns(2)
+        mes_modelo = c1.selectbox("1. Mes Modelo (Origen)", LISTA_MESES_LARGA)
+        
+        # Obtener gastos del mes modelo
+        conn = get_db_connection()
+        c = conn.cursor()
+        c.execute("SELECT * FROM movimientos WHERE mes=%s AND tipo='GASTO'", (mes_modelo,))
+        columns = [desc[0] for desc in c.description]
+        df_model = pd.DataFrame(c.fetchall(), columns=columns)
+        conn.close()
+        
+        if not df_model.empty:
+            gastos_seleccionados = st.multiselect("2. Selecciona los Gastos a Copiar", df_model['tipo_gasto'].unique())
+            meses_destino = st.multiselect("3. Meses Destino", LISTA_MESES_LARGA)
+            
+            if st.button("✨ REPLICAR GASTOS SELECCIONADOS"):
+                if gastos_seleccionados and meses_destino:
+                    conn = get_db_connection(); c = conn.cursor()
+                    count = 0
+                    for m_dest in meses_destino:
+                        if m_dest == mes_modelo: continue # Evitar duplicar en el mismo mes
+                        for gasto_nm in gastos_seleccionados:
+                            # Buscar el dato original
+                            row = df_model[df_model['tipo_gasto'] == gasto_nm].iloc[0]
+                            contr = row['contrato'] if row['contrato'] else ""
+                            # Insertar
+                            c.execute("""INSERT INTO movimientos 
+                                (fecha, mes, tipo, grupo, tipo_gasto, contrato, cuota, monto, moneda, forma_pago, fecha_pago, pagado) 
+                                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,FALSE)""", 
+                                (str(datetime.date.today()), m_dest, row['tipo'], row['grupo'], row['tipo_gasto'], contr, "1/1", row['monto'], row['moneda'], row['forma_pago'], str(datetime.date.today())))
+                            count += 1
+                    conn.commit(); conn.close()
+                    logger.info(f"Replicación masiva: {count} movimientos creados.")
+                    st.success(f"¡Éxito! Se crearon {count} nuevos movimientos.")
+                else:
+                    st.error("Selecciona gastos y meses destino.")
+        else:
+            st.warning("El mes modelo no tiene gastos.")
+
+    st.divider()
     st.markdown("### 💾 EXPORTAR DATOS")
     sql = generar_backup_sql()
     st.download_button("📦 BACKUP SQL (MIGRACIÓN)", sql, "backup.sql", "text/plain", type="primary")
@@ -512,9 +724,11 @@ with tab3: # CONFIG
         conn.close()
     st.divider()
     c1, c2, c3 = st.columns(3); ms = c1.selectbox("Desde", LISTA_MESES_LARGA); md = c2.selectbox("Hasta", ["TODO"]+LISTA_MESES_LARGA)
-    if c3.button("🚀 CLONAR"):
+    if c3.button("🚀 CLONAR MES COMPLETO"):
         conn = get_db_connection(); c = conn.cursor()
-        src = pd.read_sql(f"SELECT * FROM movimientos WHERE mes='{ms}'", conn)
+        c.execute("SELECT * FROM movimientos WHERE mes=%s", (ms,))
+        columns = [desc[0] for desc in c.description]
+        src = pd.DataFrame(c.fetchall(), columns=columns)
         tgs = [m for m in LISTA_MESES_LARGA if m.split(' ')[1] == ms.split(' ')[1]] if md == "TODO" else [md]
         for t in tgs:
             if t == ms: continue
@@ -524,7 +738,7 @@ with tab3: # CONFIG
                 c.execute("INSERT INTO movimientos (fecha, mes, tipo, grupo, tipo_gasto, contrato, cuota, monto, moneda, forma_pago, fecha_pago) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)", (str(datetime.date.today()), t, r['tipo'], r['grupo'], r['tipo_gasto'], contr, r['cuota'], r['monto'], r['moneda'], r['forma_pago'], r['fecha_pago']))
         conn.commit(); st.success("Clonado"); st.rerun()
 
-with tab4: # DEUDAS
+with tab5: # DEUDAS
     st.header("📉 Deudas")
     c1, c2 = st.columns([1, 2]); conn = get_db_connection(); c = conn.cursor()
     with c1:
