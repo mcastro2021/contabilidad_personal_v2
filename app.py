@@ -487,4 +487,4 @@ with tab5: # DEUDAS
                     c1,c2=st.columns(2); m=c1.text_input("Monto",key=f"m{d['id']}"); p=c2.selectbox("Pago",OPCIONES_PAGO,key=f"p{d['id']}")
                     if st.button("Pagar",key=f"b{d['id']}"): c.execute("INSERT INTO movimientos (fecha,mes,tipo,grupo,tipo_gasto,cuota,monto,moneda,forma_pago,fecha_pago,pagado) VALUES (%s,%s,'GASTO','DEUDAS',%s,'',%s,%s,%s,%s,TRUE)",(str(datetime.date.today()),mes_global,f"Pago: {d['nombre_deuda']}",procesar_monto_input(m),d['moneda'],p,str(datetime.date.today())));conn.commit();st.rerun()
                 if st.button("Eliminar",key=f"e{d['id']}"): c.execute("DELETE FROM deudas WHERE id=%s",(d['id'],));conn.commit();st.rerun()
-    conn.close() 
+    conn.close()
