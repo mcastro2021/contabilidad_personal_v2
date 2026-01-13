@@ -291,7 +291,7 @@ with tab1:
                 df_filtrado = df_filtrado[pd.to_datetime(df_filtrado['fecha_pago']).dt.day == filtro_dia]
         except: pass
 
-        # GRAFICOS
+        # Gráficos
         df_filtrado['m_ars_v'] = df_filtrado.apply(lambda x: x['monto'] * dolar_val if x['moneda'] == 'USD' else x['monto'], axis=1)
         c_g1, c_g2 = st.columns(2)
         filtro_grupo = None
@@ -326,6 +326,7 @@ with tab1:
         df_tabla['tipo_vis'] = df_tabla['tipo'].apply(lambda x: "🟢 GANANCIA" if x=="GANANCIA" else "🔴 GASTO")
         if 'contrato' not in df_tabla.columns: df_tabla['contrato'] = ""
 
+        # CAMBIOS APLICADOS AQUI
         cols = ["estado", "tipo_vis", "tipo_gasto", "contrato", "monto_vis", "cuota", "forma_pago", "fecha_pago", "pagado"]
         cfg = {
             "estado": st.column_config.TextColumn("E", width="small"), 
@@ -333,7 +334,10 @@ with tab1:
             "tipo_gasto": st.column_config.TextColumn("CONCEPTO"), 
             "contrato": st.column_config.TextColumn("CUENTA/CONTRATO"), 
             "monto_vis": st.column_config.TextColumn("MONTO"), 
-            "pagado": st.column_config.CheckboxColumn("OK")
+            "cuota": st.column_config.TextColumn("CUOTA"), # Agregado
+            "forma_pago": st.column_config.TextColumn("FORMA DE PAGO"), # Cambiado
+            "fecha_pago": st.column_config.DateColumn("FECHA DE PAGO", format="DD/MM/YYYY"), # Cambiado
+            "pagado": st.column_config.CheckboxColumn("PAGADO") # Cambiado
         }
 
         st.markdown("---")
@@ -483,4 +487,4 @@ with tab5: # DEUDAS
                     c1,c2=st.columns(2); m=c1.text_input("Monto",key=f"m{d['id']}"); p=c2.selectbox("Pago",OPCIONES_PAGO,key=f"p{d['id']}")
                     if st.button("Pagar",key=f"b{d['id']}"): c.execute("INSERT INTO movimientos (fecha,mes,tipo,grupo,tipo_gasto,cuota,monto,moneda,forma_pago,fecha_pago,pagado) VALUES (%s,%s,'GASTO','DEUDAS',%s,'',%s,%s,%s,%s,TRUE)",(str(datetime.date.today()),mes_global,f"Pago: {d['nombre_deuda']}",procesar_monto_input(m),d['moneda'],p,str(datetime.date.today())));conn.commit();st.rerun()
                 if st.button("Eliminar",key=f"e{d['id']}"): c.execute("DELETE FROM deudas WHERE id=%s",(d['id'],));conn.commit();st.rerun()
-    conn.close()
+    conn.close() 
