@@ -11,3 +11,5 @@ openai
 matplotlib
 tabulate
 beautifulsoup4
+google-generativeai 
+matplotlib

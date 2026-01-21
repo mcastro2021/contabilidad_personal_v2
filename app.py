@@ -16,15 +16,26 @@ from email.mime.multipart import MIMEMultipart
 import calendar
 import logging
 
+# --- IMPORTACIÓN SEGURA DE IA ---
+try:
+    import google.generativeai as genai
+    HAS_AI = True
+except ImportError:
+    HAS_AI = False
+
 # --- CONFIGURACIÓN DE LOGGING ---
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s', handlers=[logging.StreamHandler()])
+logging.basicConfig(
+    level=logging.INFO, 
+    format='%(asctime)s - %(levelname)s - %(message)s', 
+    handlers=[logging.StreamHandler()]
+)
 logger = logging.getLogger(__name__)
 
 # --- CARGAR VARIABLES ---
 load_dotenv()
 
 # --- CONFIGURACIÓN DE PÁGINA ---
-st.set_page_config(page_title="CONTABILIDAD PERSONAL V4", layout="wide")
+st.set_page_config(page_title="CONTABILIDAD PERSONAL V5 (IA)", layout="wide")
 
 # --- COLORES GLOBALES ---
 COLOR_MAP = {
@@ -42,13 +53,19 @@ def enviar_notificacion(asunto, mensaje):
         if not all([sender_email, sender_password, receiver_email]): return 
 
         msg = MIMEMultipart()
-        msg['From'] = sender_email; msg['To'] = receiver_email; msg['Subject'] = f"🔔 FINANZAS V4: {asunto}"
+        msg['From'] = sender_email
+        msg['To'] = receiver_email
+        msg['Subject'] = f"🔔 FINANZAS V5: {asunto}"
         msg.attach(MIMEText(mensaje, 'plain'))
-        server = smtplib.SMTP('smtp.gmail.com', 587); server.starttls()
+        
+        server = smtplib.SMTP('smtp.gmail.com', 587)
+        server.starttls()
         server.login(sender_email, sender_password)
-        server.sendmail(sender_email, receiver_email, msg.as_string()); server.quit()
+        server.sendmail(sender_email, receiver_email, msg.as_string())
+        server.quit()
         logger.info(f"Email enviado: {asunto}")
-    except Exception as e: logger.error(f"Fallo email: {e}")
+    except Exception as e: 
+        logger.error(f"Fallo envío email: {e}")
 
 # --- GENERADOR DE MESES ---
 def generar_lista_meses(start_year=2026, end_year=2035):
@@ -65,6 +82,7 @@ def load_lottieurl(url):
     except: return None
 
 LOTTIE_FINANCE = "https://lottie.host/02a55953-2736-4763-b183-116515b81045/L1O1fW89yB.json" 
+
 def make_hashes(p): return hashlib.sha256(str.encode(p)).hexdigest()
 def check_hashes(p, h): return make_hashes(p) == h
 
@@ -81,7 +99,9 @@ def procesar_monto_input(t):
 # --- BASE DE DATOS ---
 def get_db_connection():
     try: return psycopg2.connect(os.environ.get('DATABASE_URL'))
-    except Exception as e: st.error("Error DB"); st.stop()
+    except Exception as e: 
+        logger.critical(f"DB Connection Error: {e}")
+        st.error("Error de conexión a Base de Datos"); st.stop()
 
 def init_db():
     try:
@@ -108,7 +128,7 @@ def generar_backup_sql():
     try:
         conn = get_db_connection(); c = conn.cursor()
         tablas = ['grupos', 'users', 'deudas', 'movimientos', 'inversiones']
-        script = "-- BACKUP CONTABILIDAD V4 --\nTRUNCATE TABLE movimientos, deudas, grupos, users, inversiones RESTART IDENTITY CASCADE;\n\n"
+        script = "-- BACKUP CONTABILIDAD V5 --\nTRUNCATE TABLE movimientos, deudas, grupos, users, inversiones RESTART IDENTITY CASCADE;\n\n"
         for t in tablas:
             c.execute(f"SELECT * FROM {t}"); rows = c.fetchall()
             if rows:
@@ -120,7 +140,7 @@ def generar_backup_sql():
         conn.close(); return script
     except Exception as e: return f"-- Error: {e}"
 
-# --- LÓGICA ---
+# --- LÓGICA AUTOMÁTICA ---
 def calcular_monto_salario_mes(m):
     if m in SMVM_BASE_2026: 
         val = SMVM_BASE_2026[m] * 2.5
@@ -188,7 +208,7 @@ def get_dolar():
         return (float(r['compra']) + float(r['venta'])) / 2, f"(Compra: ${int(r['compra'])} | Venta: ${int(r['venta'])})"
     except: return 1480.0, "(Ref)"
 
-# --- MAIN ---
+# --- LOGIN ---
 if 'logged_in' not in st.session_state: st.session_state['logged_in'] = False
 if 'username' not in st.session_state: st.session_state['username'] = ''
 
@@ -203,64 +223,129 @@ if not st.session_state['logged_in']:
             if st.form_submit_button("Entrar", use_container_width=True):
                 conn = get_db_connection(); c = conn.cursor()
                 c.execute("SELECT * FROM users WHERE username=%s AND password=%s", (u, make_hashes(p)))
-                if c.fetchall(): st.session_state['logged_in'] = True; st.session_state['username'] = u; st.rerun()
-                else: st.error("Error"); conn.close()
+                if c.fetchall(): 
+                    st.session_state['logged_in'] = True; st.session_state['username'] = u; st.rerun()
+                else: 
+                    st.error("Error"); conn.close()
     st.stop()
+
+# ==========================================
+# APP
+# ==========================================
+dolar_val, dolar_info = get_dolar()
+automatizaciones()
+conn = get_db_connection()
+grupos_db = pd.read_sql("SELECT nombre FROM grupos ORDER BY nombre ASC", conn)['nombre'].tolist()
+df_all = pd.read_sql("SELECT * FROM movimientos", conn)
+conn.close()
 
 with st.sidebar:
     lottie = load_lottieurl(LOTTIE_FINANCE)
     if lottie: st_lottie(lottie, height=100)
     st.write(f"👤 **{st.session_state['username']}**")
     if st.button("Salir"): st.session_state['logged_in'] = False; st.rerun()
+    st.divider()
 
-dolar_val, dolar_info = get_dolar()
-st.title("CONTABILIDAD PERSONAL V4")
-mes_global = st.selectbox("📅 MES DE TRABAJO:", LISTA_MESES_LARGA)
-automatizaciones()
-
-conn = get_db_connection()
-grupos_db = pd.read_sql("SELECT nombre FROM grupos ORDER BY nombre ASC", conn)['nombre'].tolist()
-df_all = pd.read_sql("SELECT * FROM movimientos", conn)
-conn.close()
-
-st.sidebar.header("📥 CARGAR NUEVO")
-with st.sidebar.form("alta"):
-    t_sel = st.selectbox("TIPO", ["GASTO", "GANANCIA"])
-    g_sel = st.selectbox("GRUPO", grupos_db)
-    c_con, c_cont = st.columns(2)
-    con = c_con.text_input("CONCEPTO"); cont = c_cont.text_input("CUENTA O CONTRATO")
-    c1, c2 = st.columns(2); c_act = c1.number_input("Cuota", 1, 300, 1); c_tot = c2.number_input("Total", 1, 300, 1)
-    m_inp = st.text_input("MONTO", "0,00"); mon = st.radio("MONEDA", ["ARS", "USD"], horizontal=True)
-    pag = st.selectbox("PAGO", OPCIONES_PAGO); fec = st.date_input("FECHA", datetime.date(2026, 1, 1))
-    ya = st.checkbox("¿Pagado?")
+    # --- SELECTOR DE MES GLOBAL (Para Dashboard y Carga) ---
+    st.header("📅 Configuración")
+    mes_global = st.selectbox("Mes de Trabajo:", LISTA_MESES_LARGA)
     
-    if st.form_submit_button("GRABAR"):
-        mf = procesar_monto_input(m_inp); conn = get_db_connection(); c = conn.cursor(); idx = LISTA_MESES_LARGA.index(mes_global)
-        if c_tot == 1:
-            vc = calcular_monto_salario_mes(mes_global)
-            mg = vc if (con.strip().upper() == "SALARIO CHICOS" and vc) else mf
-            c.execute("INSERT INTO movimientos (fecha, mes, tipo, grupo, tipo_gasto, contrato, cuota, monto, moneda, forma_pago, fecha_pago, pagado) VALUES (%s,%s,%s,%s,%s,%s,'',%s,%s,%s,%s,%s)", (str(datetime.date.today()), mes_global, t_sel, g_sel, con, cont, mg, mon, pag, str(fec), ya))
-        else:
-            for i in range(int(c_act), int(c_tot)+1):
-                off = i - int(c_act)
-                if idx + off < len(LISTA_MESES_LARGA):
-                    mt = LISTA_MESES_LARGA[idx + off]; vc = calcular_monto_salario_mes(mt)
-                    mg = vc if (con.strip().upper() == "SALARIO CHICOS" and vc) else mf
-                    c.execute("INSERT INTO movimientos (fecha, mes, tipo, grupo, tipo_gasto, contrato, cuota, monto, moneda, forma_pago, fecha_pago, pagado) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)", (str(datetime.date.today()), mt, t_sel, g_sel, con, cont, f"{i}/{c_tot}", mg, mon, pag, (fec + datetime.timedelta(days=30*off)).strftime('%Y-%m-%d'), ya if off==0 else False))
-        conn.commit(); conn.close(); actualizar_saldos(mes_global)
-        enviar_notificacion("Nuevo", f"{con} ({mf})"); st.success("Guardado"); st.rerun()
+    st.divider()
 
-# --- TABS ---
+    # --- FORMULARIO DE CARGA ---
+    st.header("📥 Cargar Nuevo")
+    with st.form("alta_movimiento"):
+        # Usamos mes_global para que por defecto cargue en el mes que estamos viendo
+        t_sel = st.selectbox("TIPO", ["GASTO", "GANANCIA"])
+        g_sel = st.selectbox("GRUPO", grupos_db)
+        c_con, c_cont = st.columns(2)
+        con = c_con.text_input("CONCEPTO"); cont = c_cont.text_input("CUENTA O CONTRATO")
+        c1, c2 = st.columns(2); c_act = c1.number_input("Cuota", 1, 300, 1); c_tot = c2.number_input("Total", 1, 300, 1)
+        m_inp = st.text_input("MONTO", "0,00"); mon = st.radio("MONEDA", ["ARS", "USD"], horizontal=True)
+        pag = st.selectbox("PAGO", OPCIONES_PAGO); fec = st.date_input("FECHA", datetime.date(2026, 1, 1))
+        ya = st.checkbox("¿Pagado?")
+        
+        if st.form_submit_button("GRABAR"):
+            mf = procesar_monto_input(m_inp); conn = get_db_connection(); c = conn.cursor(); idx = LISTA_MESES_LARGA.index(mes_global)
+            if c_tot == 1:
+                vc = calcular_monto_salario_mes(mes_global)
+                mg = vc if (con.strip().upper() == "SALARIO CHICOS" and vc) else mf
+                c.execute("INSERT INTO movimientos (fecha, mes, tipo, grupo, tipo_gasto, contrato, cuota, monto, moneda, forma_pago, fecha_pago, pagado) VALUES (%s,%s,%s,%s,%s,%s,'',%s,%s,%s,%s,%s)", (str(datetime.date.today()), mes_global, t_sel, g_sel, con, cont, mg, mon, pag, str(fec), ya))
+            else:
+                for i in range(int(c_act), int(c_tot)+1):
+                    off = i - int(c_act)
+                    if idx + off < len(LISTA_MESES_LARGA):
+                        mt = LISTA_MESES_LARGA[idx + off]; vc = calcular_monto_salario_mes(mt)
+                        mg = vc if (con.strip().upper() == "SALARIO CHICOS" and vc) else mf
+                        c.execute("INSERT INTO movimientos (fecha, mes, tipo, grupo, tipo_gasto, contrato, cuota, monto, moneda, forma_pago, fecha_pago, pagado) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)", (str(datetime.date.today()), mt, t_sel, g_sel, con, cont, f"{i}/{c_tot}", mg, mon, pag, (fec + datetime.timedelta(days=30*off)).strftime('%Y-%m-%d'), ya if off==0 else False))
+            conn.commit(); conn.close(); actualizar_saldos(mes_global)
+            enviar_notificacion("Nuevo", f"{con} ({mf})"); st.success("Guardado"); st.rerun()
+
+    st.divider()
+
+    # --- CHAT IA ---
+    with st.expander("🤖 Asistente IA (Chat)", expanded=False):
+        api_key = os.environ.get("GOOGLE_API_KEY")
+        if not api_key:
+            st.warning("Falta API Key")
+        elif not HAS_AI:
+            st.error("Falta librería IA")
+        else:
+            try:
+                genai.configure(api_key=api_key)
+                models_list = []
+                try:
+                    for m in genai.list_models():
+                        if 'generateContent' in m.supported_generation_methods: models_list.append(m.name)
+                except: pass
+                
+                if not models_list: model_name = 'models/gemini-1.5-flash'
+                else:
+                    preferidos = ['models/gemini-1.5-flash', 'models/gemini-1.5-flash-latest', 'models/gemini-pro']
+                    model_name = next((m for m in preferidos if m in models_list), models_list[0])
+                
+                st.caption(f"🧠 {model_name.split('/')[-1]}")
+                model = genai.GenerativeModel(model_name)
+                
+                with st.form(key="chat_ia_form"):
+                    pregunta = st.text_input("Pregunta sobre tus datos:", key="q_ia_sb")
+                    enviado_chat = st.form_submit_button("Enviar")
+                    
+                    if enviado_chat and pregunta:
+                        with st.spinner("Pensando..."):
+                            try:
+                                df_chat = df_all.copy()
+                                info = ", ".join([f"{c} ({t})" for c, t in zip(df_chat.columns, df_chat.dtypes)])
+                                prompt = f"""
+                                Contexto: Finanzas en Argentina. Moneda: ARS ($).
+                                DataFrame `df_chat`: {info}.
+                                Usuario: "{pregunta}".
+                                Instrucciones:
+                                1. Genera SOLO código Python.
+                                2. BÚSQUEDA FLEXIBLE: Usa Regex. Ej: 'poll' encuentra 'pollo', 'pollos'. Usa `.str.contains(r'termino', case=False, na=False, regex=True)`.
+                                3. TOTALES: Suma columna `monto`.
+                                4. Output: `resultado_texto` (str) y `figura_plotly` (px).
+                                5. NO print().
+                                """
+                                resp = model.generate_content(prompt).text.replace("```python", "").replace("```", "").strip()
+                                loc = {"df_chat": df_chat, "pd": pd, "px": px, "go": go, "st": st}
+                                exec(resp, globals(), loc)
+                                
+                                if "resultado_texto" in loc: st.info(loc["resultado_texto"])
+                                if "figura_plotly" in loc and isinstance(loc["figura_plotly"], go.Figure):
+                                    st.plotly_chart(loc["figura_plotly"], use_container_width=True)
+                            except Exception as e: st.error(f"Error: {e}")
+            except Exception as e: st.error(f"Conexión IA: {e}")
+
+# --- TABS PRINCIPALES ---
+st.title("CONTABILIDAD PERSONAL V5")
 tab1, tab2, tab3, tab4, tab5 = st.tabs(["📊 DASHBOARD", "💰 INVERSIONES", "🔮 PREDICCIONES", "⚙️ CONFIGURACIÓN", "📉 DEUDAS"])
 
 with tab1:
     st.info(f"Dolar Blue: {formato_moneda_visual(dolar_val, 'ARS')} {dolar_info}")
-    
-    # 1. FILTRADO EN CASCADA
     df_filtrado = df_all[df_all['mes'] == mes_global].copy()
     
     if not df_filtrado.empty:
-        # KPI
         r_ars = df_filtrado[(df_filtrado['moneda']=="ARS")&(df_filtrado['tipo']=="GANANCIA")]['monto'].sum() - df_filtrado[(df_filtrado['moneda']=="ARS")&(df_filtrado['tipo']=="GASTO")]['monto'].sum()
         r_usd = df_filtrado[(df_filtrado['moneda']=="USD")&(df_filtrado['tipo']=="GANANCIA")]['monto'].sum() - df_filtrado[(df_filtrado['moneda']=="USD")&(df_filtrado['tipo']=="GASTO")]['monto'].sum()
         c1, c2, c3 = st.columns(3)
@@ -269,7 +354,7 @@ with tab1:
         c3.metric("PATRIMONIO", formato_moneda_visual(r_ars + (r_usd * dolar_val), "ARS"))
         st.divider()
 
-        # Calendario
+        # CALENDARIO
         filtro_dia = None
         try:
             mn, an = mes_global.split(" "); av = int(an); mv = {"Enero":1,"Febrero":2,"Marzo":3,"Abril":4,"Mayo":5,"Junio":6,"Julio":7,"Agosto":8,"Septiembre":9,"Octubre":10,"Noviembre":11,"Diciembre":12}.get(mn, 1)
@@ -283,7 +368,6 @@ with tab1:
                 marker=dict(size=45, symbol='square', color=dfcal['M'], colorscale='Greens', showscale=False, line=dict(width=1, color='gray')),
                 textfont=dict(color='black', size=12), hovertext=[f"${r.M:,.0f}" for i, r in dfcal.iterrows()]))
             fig_cal.update_layout(title=dict(text=f"📅 {mes_global} (Click para filtrar día)", x=0.5), xaxis=dict(showgrid=False, zeroline=False, tickvals=[0,1,2,3,4,5,6], ticktext=["L","M","M","J","V","S","D"], side='top', range=[-0.5, 6.5]), yaxis=dict(showgrid=False, zeroline=False, autorange="reversed", showticklabels=False), height=350, margin=dict(t=50, b=10), clickmode='event+select', plot_bgcolor='rgba(0,0,0,0)')
-            
             sel_cal = st.plotly_chart(fig_cal, on_select="rerun", selection_mode="points", use_container_width=True)
             if sel_cal and sel_cal["selection"]["points"]:
                 filtro_dia = int(sel_cal["selection"]["points"][0]["text"])
@@ -291,7 +375,7 @@ with tab1:
                 df_filtrado = df_filtrado[pd.to_datetime(df_filtrado['fecha_pago']).dt.day == filtro_dia]
         except: pass
 
-        # Gráficos
+        # GRÁFICOS
         df_filtrado['m_ars_v'] = df_filtrado.apply(lambda x: x['monto'] * dolar_val if x['moneda'] == 'USD' else x['monto'], axis=1)
         c_g1, c_g2 = st.columns(2)
         filtro_grupo = None
@@ -311,11 +395,10 @@ with tab1:
         with c_g2:
             st.caption("Flujo de Caja (Ingresos vs Egresos)")
             if not df_filtrado.empty:
-                # GRAFICO BARRAS CON COLORES ROJO/VERDE
                 df_flow = df_filtrado.groupby(['moneda', 'tipo'])['monto'].sum().reset_index()
                 st.plotly_chart(px.bar(df_flow, x='moneda', y='monto', color='tipo', barmode='group', color_discrete_map=COLOR_MAP), use_container_width=True)
 
-        # Tabla Final
+        # TABLA
         df_tabla = df_filtrado.copy()
         if filtro_grupo: df_tabla = df_tabla[df_tabla['grupo'] == filtro_grupo]
 
@@ -342,7 +425,6 @@ with tab1:
         def style_fn(row): return ['background-color: #1c3323' if row['pagado'] else ''] * len(row)
         selected = []
         
-        # TABLA UNIFICADA O SEPARADA
         for gt in ["GANANCIA", "GASTO"]:
             dft = df_tabla[df_tabla['tipo'] == gt]
             if not dft.empty:
@@ -350,18 +432,16 @@ with tab1:
                 for grp in sorted(dft['grupo'].unique()):
                     with st.container():
                         st.subheader(f"📂 {grp}")
-                        dfg = dft[dft['grupo'] == grp]
+                        dfg = dft[dft['grupo'] == grp].sort_values(by=['pagado', 'fecha_pago'], ascending=[True, True])
                         s = st.dataframe(dfg[cols].style.apply(style_fn, axis=1), column_config=cfg, use_container_width=True, hide_index=True, on_select="rerun", selection_mode="multi-row", key=f"t_{gt}_{grp}")
                         
-                        # --- SUBTOTAL POR GRUPO (NUEVO) ---
                         total_grupo = dfg['m_ars_v'].sum()
                         st.markdown(f"**📉 Total {grp}: {formato_moneda_visual(total_grupo, 'ARS')}**")
-                        # ----------------------------------
 
                         if s.selection.rows:
                             for i in s.selection.rows: selected.append(dfg.iloc[i])
         
-        # Edición
+        # EDICION
         if len(selected) == 1:
             r = selected[0]; idm = int(r['id'])
             st.markdown(f"### ✏️ Editar: {r['tipo_gasto']}")
@@ -396,7 +476,7 @@ with tab1:
                 c.execute("DELETE FROM movimientos WHERE id IN %s", (tuple([int(x['id']) for x in selected]),))
                 conn.commit(); conn.close(); actualizar_saldos(mes_global); st.rerun()
 
-with tab2: # INVERSIONES (CORREGIDO)
+with tab2: # INVERSIONES
     st.header("💰 Inversiones")
     with st.expander("➕ NUEVA", expanded=False):
         with st.form("inv"):
@@ -429,18 +509,38 @@ with tab2: # INVERSIONES (CORREGIDO)
         st.info(f"Capital: {formato_moneda_visual(tot,'ARS')} | Ganancia Est.: {formato_moneda_visual(gan,'ARS')}")
 
 with tab3: # PREDICCIONES
-    st.header("🔮 IA Predicción")
-    dfa = df_all[df_all['tipo']=='GASTO'].copy()
-    if len(dfa)>0:
-        dfa['mn'] = dfa.apply(lambda x: x['monto']*dolar_val if x['moneda']=='USD' else x['monto'], axis=1)
-        mapa = {m: i+1 for i, m in enumerate(LISTA_MESES_LARGA)}; dfa['mi'] = dfa['mes'].map(mapa)
-        dfg = dfa.groupby('mi')['mn'].sum().reset_index().sort_values('mi')
-        if len(dfg)>=2:
-            lr = LinearRegression(); lr.fit(dfg['mi'].values.reshape(-1,1), dfg['mn'].values)
-            pr = lr.predict([[dfg['mi'].max()+1]])[0]
-            st.metric("Gasto Estimado Próx. Mes", formato_moneda_visual(pr, "ARS"))
-            fig = go.Figure(); fig.add_trace(go.Scatter(x=dfg['mi'], y=dfg['mn'], name='Real')); fig.add_trace(go.Scatter(x=dfg['mi'], y=lr.predict(dfg['mi'].values.reshape(-1,1)), name='Tendencia'))
+    st.header("🔮 Tendencias y Proyecciones")
+    df_base = df_all[df_all['tipo'] == 'GASTO'].copy()
+    if not df_base.empty:
+        df_base['monto_calc'] = df_base.apply(lambda x: x['monto'] * dolar_val if x['moneda'] == 'USD' else x['monto'], axis=1)
+        opciones_prediccion = ["TOTAL GENERAL"] + sorted(df_base['grupo'].unique().tolist())
+        seleccion = st.selectbox("¿Qué quieres analizar?", opciones_prediccion)
+        df_ai = df_base if seleccion == "TOTAL GENERAL" else df_base[df_base['grupo'] == seleccion]
+        mapa_meses = {m: i for i, m in enumerate(LISTA_MESES_LARGA)}
+        df_ai['mes_idx'] = df_ai['mes'].map(mapa_meses)
+        df_tendencia = df_ai.groupby(['mes_idx', 'mes'])['monto_calc'].sum().reset_index().sort_values('mes_idx')
+
+        if len(df_tendencia) >= 2:
+            X = df_tendencia['mes_idx'].values.reshape(-1, 1); y = df_tendencia['monto_calc'].values
+            model = LinearRegression(); model.fit(X, y)
+            siguiente_mes_idx = df_tendencia['mes_idx'].max() + 1
+            prediccion = max(0, model.predict([[siguiente_mes_idx]])[0])
+            promedio_historico = y.mean(); diferencia = prediccion - promedio_historico
+            
+            c1, c2, c3 = st.columns(3)
+            c1.metric("Promedio Histórico", formato_moneda_visual(promedio_historico, "ARS"))
+            c2.metric("Proyección Próximo Mes", formato_moneda_visual(prediccion, "ARS"), delta=formato_moneda_visual(diferencia, "ARS"), delta_color="inverse")
+            c3.info(f"Tendencia: **{'📈 Subiendo' if diferencia > 0 else '📉 Bajando'}**")
+
+            fig = go.Figure()
+            fig.add_trace(go.Bar(x=df_tendencia['mes'], y=df_tendencia['monto_calc'], name='Gasto Real', marker_color='#6c757d'))
+            fig.add_trace(go.Scatter(x=df_tendencia['mes'], y=model.predict(X), mode='lines', name='Tendencia', line=dict(color='#007bff', width=3, dash='dot')))
+            nombre_prox = LISTA_MESES_LARGA[siguiente_mes_idx] if siguiente_mes_idx < len(LISTA_MESES_LARGA) else "Próximo"
+            fig.add_trace(go.Scatter(x=[nombre_prox], y=[prediccion], mode='markers+text', name='Proyección', marker=dict(color='#28a745', size=15, symbol='star'), text=[formato_moneda_visual(prediccion, "ARS")], textposition="top center"))
+            fig.update_layout(title=f"Evolución: {seleccion}", height=400)
             st.plotly_chart(fig, use_container_width=True)
+        else: st.warning("Faltan datos para predecir.")
+    else: st.info("Sin datos.")
 
 with tab4: # CONFIG
     st.header("⚙️ Configuración")
