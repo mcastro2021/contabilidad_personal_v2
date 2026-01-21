@@ -322,11 +322,9 @@ with tab1:
         df_tabla['monto_vis'] = df_tabla.apply(lambda x: formato_moneda_visual(x['monto'], x['moneda']), axis=1)
         df_tabla['pagado'] = df_tabla['pagado'].fillna(False).astype(bool)
         df_tabla['estado'] = df_tabla['pagado'].apply(lambda x: "✅" if x else "⏳")
-        # Visualizador de tipo con Emojis
         df_tabla['tipo_vis'] = df_tabla['tipo'].apply(lambda x: "🟢 GANANCIA" if x=="GANANCIA" else "🔴 GASTO")
         if 'contrato' not in df_tabla.columns: df_tabla['contrato'] = ""
 
-        # CAMBIOS APLICADOS AQUI
         cols = ["estado", "tipo_vis", "tipo_gasto", "contrato", "monto_vis", "cuota", "forma_pago", "fecha_pago", "pagado"]
         cfg = {
             "estado": st.column_config.TextColumn("E", width="small"), 
@@ -334,17 +332,17 @@ with tab1:
             "tipo_gasto": st.column_config.TextColumn("CONCEPTO"), 
             "contrato": st.column_config.TextColumn("CUENTA/CONTRATO"), 
             "monto_vis": st.column_config.TextColumn("MONTO"), 
-            "cuota": st.column_config.TextColumn("CUOTA"), # Agregado
-            "forma_pago": st.column_config.TextColumn("FORMA DE PAGO"), # Cambiado
-            "fecha_pago": st.column_config.DateColumn("FECHA DE PAGO", format="DD/MM/YYYY"), # Cambiado
-            "pagado": st.column_config.CheckboxColumn("PAGADO") # Cambiado
+            "cuota": st.column_config.TextColumn("CUOTA"), 
+            "forma_pago": st.column_config.TextColumn("FORMA DE PAGO"), 
+            "fecha_pago": st.column_config.DateColumn("FECHA DE PAGO", format="DD/MM/YYYY"), 
+            "pagado": st.column_config.CheckboxColumn("PAGADO")
         }
 
         st.markdown("---")
         def style_fn(row): return ['background-color: #1c3323' if row['pagado'] else ''] * len(row)
         selected = []
         
-        # TABLA UNIFICADA O SEPARADA (Mantengo separada para orden visual)
+        # TABLA UNIFICADA O SEPARADA
         for gt in ["GANANCIA", "GASTO"]:
             dft = df_tabla[df_tabla['tipo'] == gt]
             if not dft.empty:
@@ -354,6 +352,12 @@ with tab1:
                         st.subheader(f"📂 {grp}")
                         dfg = dft[dft['grupo'] == grp]
                         s = st.dataframe(dfg[cols].style.apply(style_fn, axis=1), column_config=cfg, use_container_width=True, hide_index=True, on_select="rerun", selection_mode="multi-row", key=f"t_{gt}_{grp}")
+                        
+                        # --- SUBTOTAL POR GRUPO (NUEVO) ---
+                        total_grupo = dfg['m_ars_v'].sum()
+                        st.markdown(f"**📉 Total {grp}: {formato_moneda_visual(total_grupo, 'ARS')}**")
+                        # ----------------------------------
+
                         if s.selection.rows:
                             for i in s.selection.rows: selected.append(dfg.iloc[i])
         
