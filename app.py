@@ -96,6 +96,48 @@ def procesar_monto_input(t):
     try: return float(str(t).strip().replace("$","").replace("US","").replace(" ","").replace(".","").replace(",", ".")) if not isinstance(t, (int, float)) else float(t)
     except: return 0.0
 
+# --- NUEVA FUNCIÓN: SISTEMA DE ALERTAS ---
+def generar_alertas(df):
+    hoy = datetime.date.today()
+    limite = hoy + datetime.timedelta(days=5) # 5 días de aviso
+    mensajes = []
+    
+    if df.empty: return mensajes
+
+    # 1. Buscar Pagos Pendientes (Gastos no pagados)
+    pendientes = df[(df['tipo'] == 'GASTO') & (df['pagado'] == False)].copy()
+    for i, r in pendientes.iterrows():
+        try:
+            f_pago = pd.to_datetime(r['fecha_pago']).date()
+            # Si ya pasó la fecha
+            if f_pago < hoy:
+                mensajes.append(f"🚨 **VENCIDO:** {r['tipo_gasto']} ({formato_moneda_visual(r['monto'], r['moneda'])}) - Venció el {f_pago.strftime('%d/%m')}")
+            # Si vence en los próximos 5 días
+            elif hoy <= f_pago <= limite:
+                dias_restantes = (f_pago - hoy).days
+                txt_dia = "HOY" if dias_restantes == 0 else f"en {dias_restantes} días"
+                mensajes.append(f"⚠️ **Vence {txt_dia}:** {r['tipo_gasto']} ({formato_moneda_visual(r['monto'], r['moneda'])})")
+        except: pass
+
+    # 2. Buscar Cobros Cercanos (Sueldo/Ingresos)
+    # Buscamos palabras clave en ingresos futuros
+    ingresos = df[(df['tipo'] == 'GANANCIA')].copy()
+    keywords_sueldo = ['sueldo', 'salario', 'honorarios', 'cobro', 'adelanto', 'quincena']
+    
+    for i, r in ingresos.iterrows():
+        try:
+            f_cobro = pd.to_datetime(r['fecha_pago']).date()
+            # Chequeamos si es un sueldo por palabra clave
+            es_sueldo = any(k in str(r['tipo_gasto']).lower() for k in keywords_sueldo)
+            
+            if es_sueldo and (hoy <= f_cobro <= limite):
+                dias_restantes = (f_cobro - hoy).days
+                txt_dia = "HOY" if dias_restantes == 0 else f"en {dias_restantes} días"
+                mensajes.append(f"💵 **Cobras {txt_dia}:** {r['tipo_gasto']} ({formato_moneda_visual(r['monto'], r['moneda'])})")
+        except: pass
+        
+    return mensajes
+
 # --- BASE DE DATOS ---
 def get_db_connection():
     try: return psycopg2.connect(os.environ.get('DATABASE_URL'))
@@ -246,7 +288,7 @@ with st.sidebar:
     if st.button("Salir"): st.session_state['logged_in'] = False; st.rerun()
     st.divider()
 
-    # --- SELECTOR DE MES GLOBAL (Para Dashboard y Carga) ---
+    # --- SELECTOR DE MES GLOBAL ---
     st.header("📅 Configuración")
     mes_global = st.selectbox("Mes de Trabajo:", LISTA_MESES_LARGA)
     
@@ -255,7 +297,6 @@ with st.sidebar:
     # --- FORMULARIO DE CARGA ---
     st.header("📥 Cargar Nuevo")
     with st.form("alta_movimiento"):
-        # Usamos mes_global para que por defecto cargue en el mes que estamos viendo
         t_sel = st.selectbox("TIPO", ["GASTO", "GANANCIA"])
         g_sel = st.selectbox("GRUPO", grupos_db)
         c_con, c_cont = st.columns(2)
@@ -320,11 +361,12 @@ with st.sidebar:
                                 Contexto: Finanzas en Argentina. Moneda: ARS ($).
                                 DataFrame `df_chat`: {info}.
                                 Usuario: "{pregunta}".
-                                Instrucciones:
-                                1. Genera SOLO código Python.
-                                2. BÚSQUEDA FLEXIBLE: Usa Regex. Ej: 'poll' encuentra 'pollo', 'pollos'. Usa `.str.contains(r'termino', case=False, na=False, regex=True)`.
+                                
+                                Instrucciones OBLIGATORIAS:
+                                1. Genera SOLO bloque de código Python. Sin markdown.
+                                2. BÚSQUEDA FLEXIBLE: Usa Regex. Ej: 'poll' encuentra 'pollo', 'pollos'. Usa `.str.contains(r'termino', case=False, na=False, regex=True)`. Busca en `tipo_gasto` y `grupo`.
                                 3. TOTALES: Suma columna `monto`.
-                                4. Output: `resultado_texto` (str) y `figura_plotly` (px).
+                                4. VARIABLES: `resultado_texto` (str) y `figura_plotly` (px).
                                 5. NO print().
                                 """
                                 resp = model.generate_content(prompt).text.replace("```python", "").replace("```", "").strip()
@@ -342,10 +384,21 @@ st.title("CONTABILIDAD PERSONAL V5")
 tab1, tab2, tab3, tab4, tab5 = st.tabs(["📊 DASHBOARD", "💰 INVERSIONES", "🔮 PREDICCIONES", "⚙️ CONFIGURACIÓN", "📉 DEUDAS"])
 
 with tab1:
+    # --- SISTEMA DE ALERTAS (NUEVO) ---
+    alertas = generar_alertas(df_all)
+    if alertas:
+        with st.expander(f"🔔 Tienes {len(alertas)} Avisos Importantes", expanded=True):
+            for alerta in alertas:
+                if "VENCIDO" in alerta: st.error(alerta)
+                elif "Cobras" in alerta: st.success(alerta)
+                else: st.warning(alerta)
+    # ----------------------------------
+
     st.info(f"Dolar Blue: {formato_moneda_visual(dolar_val, 'ARS')} {dolar_info}")
     df_filtrado = df_all[df_all['mes'] == mes_global].copy()
     
     if not df_filtrado.empty:
+        # KPI GENERAL
         r_ars = df_filtrado[(df_filtrado['moneda']=="ARS")&(df_filtrado['tipo']=="GANANCIA")]['monto'].sum() - df_filtrado[(df_filtrado['moneda']=="ARS")&(df_filtrado['tipo']=="GASTO")]['monto'].sum()
         r_usd = df_filtrado[(df_filtrado['moneda']=="USD")&(df_filtrado['tipo']=="GANANCIA")]['monto'].sum() - df_filtrado[(df_filtrado['moneda']=="USD")&(df_filtrado['tipo']=="GASTO")]['monto'].sum()
         c1, c2, c3 = st.columns(3)
@@ -432,9 +485,11 @@ with tab1:
                 for grp in sorted(dft['grupo'].unique()):
                     with st.container():
                         st.subheader(f"📂 {grp}")
+                        # ORDENAMIENTO: No Pagados (False) primero, luego fecha
                         dfg = dft[dft['grupo'] == grp].sort_values(by=['pagado', 'fecha_pago'], ascending=[True, True])
                         s = st.dataframe(dfg[cols].style.apply(style_fn, axis=1), column_config=cfg, use_container_width=True, hide_index=True, on_select="rerun", selection_mode="multi-row", key=f"t_{gt}_{grp}")
                         
+                        # SUBTOTAL
                         total_grupo = dfg['m_ars_v'].sum()
                         st.markdown(f"**📉 Total {grp}: {formato_moneda_visual(total_grupo, 'ARS')}**")
 
