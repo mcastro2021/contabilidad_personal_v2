@@ -73,6 +73,21 @@ def generar_lista_meses(start_year=2026, end_year=2035):
     return [f"{m} {a}" for a in range(start_year, end_year + 1) for m in meses]
 
 LISTA_MESES_LARGA = generar_lista_meses()
+
+# --- LÓGICA DE AUTO-SELECCIÓN DE MES ACTUAL ---
+def obtener_indice_mes_actual():
+    hoy = datetime.date.today()
+    meses_es = ["Enero", "Febrero", "Marzo", "Abril", "Mayo", "Junio", "Julio", "Agosto", "Septiembre", "Octubre", "Noviembre", "Diciembre"]
+    nombre_mes_actual = f"{meses_es[hoy.month - 1]} {hoy.year}"
+    
+    # Buscamos si el mes actual existe en nuestra lista generada
+    if nombre_mes_actual in LISTA_MESES_LARGA:
+        return LISTA_MESES_LARGA.index(nombre_mes_actual)
+    else:
+        return 0 # Si no lo encuentra (ej: año fuera de rango), devuelve el primero
+
+INDICE_MES_ACTUAL = obtener_indice_mes_actual()
+
 OPCIONES_PAGO = ["Bancario", "Efectivo", "Transferencia", "Tarjeta de Debito", "Tarjeta de Credito"]
 SMVM_BASE_2026 = {"Enero 2026": 341000.0, "Febrero 2026": 346800.0, "Marzo 2026": 352400.0, "Abril 2026": 357800.0, "Mayo 2026": 363000.0, "Junio 2026": 367800.0, "Julio 2026": 372400.0, "Agosto 2026": 376600.0}
 
@@ -99,35 +114,31 @@ def procesar_monto_input(t):
 # --- NUEVA FUNCIÓN: SISTEMA DE ALERTAS ---
 def generar_alertas(df):
     hoy = datetime.date.today()
-    limite = hoy + datetime.timedelta(days=5) # 5 días de aviso
+    limite = hoy + datetime.timedelta(days=5) 
     mensajes = []
     
     if df.empty: return mensajes
 
-    # 1. Buscar Pagos Pendientes (Gastos no pagados)
+    # 1. Buscar Pagos Pendientes
     pendientes = df[(df['tipo'] == 'GASTO') & (df['pagado'] == False)].copy()
     for i, r in pendientes.iterrows():
         try:
             f_pago = pd.to_datetime(r['fecha_pago']).date()
-            # Si ya pasó la fecha
             if f_pago < hoy:
                 mensajes.append(f"🚨 **VENCIDO:** {r['tipo_gasto']} ({formato_moneda_visual(r['monto'], r['moneda'])}) - Venció el {f_pago.strftime('%d/%m')}")
-            # Si vence en los próximos 5 días
             elif hoy <= f_pago <= limite:
                 dias_restantes = (f_pago - hoy).days
                 txt_dia = "HOY" if dias_restantes == 0 else f"en {dias_restantes} días"
                 mensajes.append(f"⚠️ **Vence {txt_dia}:** {r['tipo_gasto']} ({formato_moneda_visual(r['monto'], r['moneda'])})")
         except: pass
 
-    # 2. Buscar Cobros Cercanos (Sueldo/Ingresos)
-    # Buscamos palabras clave en ingresos futuros
+    # 2. Buscar Cobros Cercanos
     ingresos = df[(df['tipo'] == 'GANANCIA')].copy()
     keywords_sueldo = ['sueldo', 'salario', 'honorarios', 'cobro', 'adelanto', 'quincena']
     
     for i, r in ingresos.iterrows():
         try:
             f_cobro = pd.to_datetime(r['fecha_pago']).date()
-            # Chequeamos si es un sueldo por palabra clave
             es_sueldo = any(k in str(r['tipo_gasto']).lower() for k in keywords_sueldo)
             
             if es_sueldo and (hoy <= f_cobro <= limite):
@@ -191,7 +202,7 @@ def calcular_monto_salario_mes(m):
         try:
             meses = ["Enero", "Febrero", "Marzo", "Abril", "Mayo", "Junio", "Julio", "Agosto", "Septiembre", "Octubre", "Noviembre", "Diciembre"]
             nom = m.split(" ")[0]
-            if nom in meses[8:]: # Sep-Dic
+            if nom in meses[8:]: 
                 ini, fin = SMVM_BASE_2026["Enero 2026"], SMVM_BASE_2026["Agosto 2026"]
                 prom = (fin - ini) / 7; base = fin + (prom * (meses.index(nom) - 7))
                 val = base * 2.5; return val * 1.5 if nom == "Diciembre" else val
@@ -272,7 +283,7 @@ if not st.session_state['logged_in']:
     st.stop()
 
 # ==========================================
-# APP
+# APP - CARGA DE DATOS
 # ==========================================
 dolar_val, dolar_info = get_dolar()
 automatizaciones()
@@ -281,6 +292,9 @@ grupos_db = pd.read_sql("SELECT nombre FROM grupos ORDER BY nombre ASC", conn)['
 df_all = pd.read_sql("SELECT * FROM movimientos", conn)
 conn.close()
 
+# ==========================================
+# SIDEBAR
+# ==========================================
 with st.sidebar:
     lottie = load_lottieurl(LOTTIE_FINANCE)
     if lottie: st_lottie(lottie, height=100)
@@ -288,30 +302,32 @@ with st.sidebar:
     if st.button("Salir"): st.session_state['logged_in'] = False; st.rerun()
     st.divider()
 
-    # --- SELECTOR DE MES GLOBAL ---
+    # --- SELECTOR DE MES GLOBAL (AUTO-SELECTED) ---
     st.header("📅 Configuración")
-    mes_global = st.selectbox("Mes de Trabajo:", LISTA_MESES_LARGA)
+    mes_global = st.selectbox("Mes de Trabajo:", LISTA_MESES_LARGA, index=INDICE_MES_ACTUAL) # <--- AQUI ESTÁ LA MAGIA
     
     st.divider()
 
-    # --- FORMULARIO DE CARGA ---
+    # --- FORMULARIO DE CARGA (AUTO-SELECTED) ---
     st.header("📥 Cargar Nuevo")
     with st.form("alta_movimiento"):
+        # Default: mes_global (que ya es el actual por defecto)
+        mes_carga = st.selectbox("📅 MES:", LISTA_MESES_LARGA, index=LISTA_MESES_LARGA.index(mes_global)) 
         t_sel = st.selectbox("TIPO", ["GASTO", "GANANCIA"])
         g_sel = st.selectbox("GRUPO", grupos_db)
         c_con, c_cont = st.columns(2)
         con = c_con.text_input("CONCEPTO"); cont = c_cont.text_input("CUENTA O CONTRATO")
         c1, c2 = st.columns(2); c_act = c1.number_input("Cuota", 1, 300, 1); c_tot = c2.number_input("Total", 1, 300, 1)
         m_inp = st.text_input("MONTO", "0,00"); mon = st.radio("MONEDA", ["ARS", "USD"], horizontal=True)
-        pag = st.selectbox("PAGO", OPCIONES_PAGO); fec = st.date_input("FECHA", datetime.date(2026, 1, 1))
+        pag = st.selectbox("PAGO", OPCIONES_PAGO); fec = st.date_input("FECHA", datetime.date.today()) # Fecha hoy por defecto
         ya = st.checkbox("¿Pagado?")
         
         if st.form_submit_button("GRABAR"):
-            mf = procesar_monto_input(m_inp); conn = get_db_connection(); c = conn.cursor(); idx = LISTA_MESES_LARGA.index(mes_global)
+            mf = procesar_monto_input(m_inp); conn = get_db_connection(); c = conn.cursor(); idx = LISTA_MESES_LARGA.index(mes_carga)
             if c_tot == 1:
-                vc = calcular_monto_salario_mes(mes_global)
+                vc = calcular_monto_salario_mes(mes_carga)
                 mg = vc if (con.strip().upper() == "SALARIO CHICOS" and vc) else mf
-                c.execute("INSERT INTO movimientos (fecha, mes, tipo, grupo, tipo_gasto, contrato, cuota, monto, moneda, forma_pago, fecha_pago, pagado) VALUES (%s,%s,%s,%s,%s,%s,'',%s,%s,%s,%s,%s)", (str(datetime.date.today()), mes_global, t_sel, g_sel, con, cont, mg, mon, pag, str(fec), ya))
+                c.execute("INSERT INTO movimientos (fecha, mes, tipo, grupo, tipo_gasto, contrato, cuota, monto, moneda, forma_pago, fecha_pago, pagado) VALUES (%s,%s,%s,%s,%s,%s,'',%s,%s,%s,%s,%s)", (str(datetime.date.today()), mes_carga, t_sel, g_sel, con, cont, mg, mon, pag, str(fec), ya))
             else:
                 for i in range(int(c_act), int(c_tot)+1):
                     off = i - int(c_act)
@@ -319,7 +335,7 @@ with st.sidebar:
                         mt = LISTA_MESES_LARGA[idx + off]; vc = calcular_monto_salario_mes(mt)
                         mg = vc if (con.strip().upper() == "SALARIO CHICOS" and vc) else mf
                         c.execute("INSERT INTO movimientos (fecha, mes, tipo, grupo, tipo_gasto, contrato, cuota, monto, moneda, forma_pago, fecha_pago, pagado) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)", (str(datetime.date.today()), mt, t_sel, g_sel, con, cont, f"{i}/{c_tot}", mg, mon, pag, (fec + datetime.timedelta(days=30*off)).strftime('%Y-%m-%d'), ya if off==0 else False))
-            conn.commit(); conn.close(); actualizar_saldos(mes_global)
+            conn.commit(); conn.close(); actualizar_saldos(mes_carga)
             enviar_notificacion("Nuevo", f"{con} ({mf})"); st.success("Guardado"); st.rerun()
 
     st.divider()
@@ -361,12 +377,11 @@ with st.sidebar:
                                 Contexto: Finanzas en Argentina. Moneda: ARS ($).
                                 DataFrame `df_chat`: {info}.
                                 Usuario: "{pregunta}".
-                                
-                                Instrucciones OBLIGATORIAS:
-                                1. Genera SOLO bloque de código Python. Sin markdown.
-                                2. BÚSQUEDA FLEXIBLE: Usa Regex. Ej: 'poll' encuentra 'pollo', 'pollos'. Usa `.str.contains(r'termino', case=False, na=False, regex=True)`. Busca en `tipo_gasto` y `grupo`.
+                                Instrucciones:
+                                1. Genera SOLO código Python.
+                                2. BÚSQUEDA FLEXIBLE: Usa Regex. Ej: 'poll' encuentra 'pollo', 'pollos'. Usa `.str.contains(r'termino', case=False, na=False, regex=True)`.
                                 3. TOTALES: Suma columna `monto`.
-                                4. VARIABLES: `resultado_texto` (str) y `figura_plotly` (px).
+                                4. Output: `resultado_texto` (str) y `figura_plotly` (px).
                                 5. NO print().
                                 """
                                 resp = model.generate_content(prompt).text.replace("```python", "").replace("```", "").strip()
@@ -384,7 +399,7 @@ st.title("CONTABILIDAD PERSONAL V5")
 tab1, tab2, tab3, tab4, tab5 = st.tabs(["📊 DASHBOARD", "💰 INVERSIONES", "🔮 PREDICCIONES", "⚙️ CONFIGURACIÓN", "📉 DEUDAS"])
 
 with tab1:
-    # --- SISTEMA DE ALERTAS (NUEVO) ---
+    # --- SISTEMA DE ALERTAS ---
     alertas = generar_alertas(df_all)
     if alertas:
         with st.expander(f"🔔 Tienes {len(alertas)} Avisos Importantes", expanded=True):
@@ -392,13 +407,11 @@ with tab1:
                 if "VENCIDO" in alerta: st.error(alerta)
                 elif "Cobras" in alerta: st.success(alerta)
                 else: st.warning(alerta)
-    # ----------------------------------
 
     st.info(f"Dolar Blue: {formato_moneda_visual(dolar_val, 'ARS')} {dolar_info}")
     df_filtrado = df_all[df_all['mes'] == mes_global].copy()
     
     if not df_filtrado.empty:
-        # KPI GENERAL
         r_ars = df_filtrado[(df_filtrado['moneda']=="ARS")&(df_filtrado['tipo']=="GANANCIA")]['monto'].sum() - df_filtrado[(df_filtrado['moneda']=="ARS")&(df_filtrado['tipo']=="GASTO")]['monto'].sum()
         r_usd = df_filtrado[(df_filtrado['moneda']=="USD")&(df_filtrado['tipo']=="GANANCIA")]['monto'].sum() - df_filtrado[(df_filtrado['moneda']=="USD")&(df_filtrado['tipo']=="GASTO")]['monto'].sum()
         c1, c2, c3 = st.columns(3)
@@ -407,7 +420,6 @@ with tab1:
         c3.metric("PATRIMONIO", formato_moneda_visual(r_ars + (r_usd * dolar_val), "ARS"))
         st.divider()
 
-        # CALENDARIO
         filtro_dia = None
         try:
             mn, an = mes_global.split(" "); av = int(an); mv = {"Enero":1,"Febrero":2,"Marzo":3,"Abril":4,"Mayo":5,"Junio":6,"Julio":7,"Agosto":8,"Septiembre":9,"Octubre":10,"Noviembre":11,"Diciembre":12}.get(mn, 1)
@@ -428,7 +440,6 @@ with tab1:
                 df_filtrado = df_filtrado[pd.to_datetime(df_filtrado['fecha_pago']).dt.day == filtro_dia]
         except: pass
 
-        # GRÁFICOS
         df_filtrado['m_ars_v'] = df_filtrado.apply(lambda x: x['monto'] * dolar_val if x['moneda'] == 'USD' else x['monto'], axis=1)
         c_g1, c_g2 = st.columns(2)
         filtro_grupo = None
@@ -451,7 +462,6 @@ with tab1:
                 df_flow = df_filtrado.groupby(['moneda', 'tipo'])['monto'].sum().reset_index()
                 st.plotly_chart(px.bar(df_flow, x='moneda', y='monto', color='tipo', barmode='group', color_discrete_map=COLOR_MAP), use_container_width=True)
 
-        # TABLA
         df_tabla = df_filtrado.copy()
         if filtro_grupo: df_tabla = df_tabla[df_tabla['grupo'] == filtro_grupo]
 
@@ -485,18 +495,13 @@ with tab1:
                 for grp in sorted(dft['grupo'].unique()):
                     with st.container():
                         st.subheader(f"📂 {grp}")
-                        # ORDENAMIENTO: No Pagados (False) primero, luego fecha
                         dfg = dft[dft['grupo'] == grp].sort_values(by=['pagado', 'fecha_pago'], ascending=[True, True])
                         s = st.dataframe(dfg[cols].style.apply(style_fn, axis=1), column_config=cfg, use_container_width=True, hide_index=True, on_select="rerun", selection_mode="multi-row", key=f"t_{gt}_{grp}")
-                        
-                        # SUBTOTAL
                         total_grupo = dfg['m_ars_v'].sum()
                         st.markdown(f"**📉 Total {grp}: {formato_moneda_visual(total_grupo, 'ARS')}**")
-
                         if s.selection.rows:
                             for i in s.selection.rows: selected.append(dfg.iloc[i])
         
-        # EDICION
         if len(selected) == 1:
             r = selected[0]; idm = int(r['id'])
             st.markdown(f"### ✏️ Editar: {r['tipo_gasto']}")
@@ -523,7 +528,6 @@ with tab1:
                     conn.commit(); conn.close(); actualizar_saldos(mes_global); st.success("Ok"); st.rerun()
                 if b2.form_submit_button("❌ Eliminar"):
                     conn = get_db_connection(); c = conn.cursor(); c.execute("DELETE FROM movimientos WHERE id=%s", (idm,)); conn.commit(); conn.close(); actualizar_saldos(mes_global); st.rerun()
-        
         elif len(selected) > 1:
             st.warning(f"Seleccionados: {len(selected)}")
             if st.button("🗑️ Eliminar Todo"):
