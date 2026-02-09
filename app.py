@@ -105,32 +105,53 @@ def procesar_monto_input(t):
     try: return float(str(t).strip().replace("$","").replace("US","").replace(" ","").replace(".","").replace(",", ".")) if not isinstance(t, (int, float)) else float(t)
     except: return 0.0
 
-def generar_alertas(df):
+# --- FUNCIÓN DE ALERTAS ACTUALIZADA (CON SUMAS) ---
+def generar_alertas(df, dolar_val):
     hoy = datetime.date.today()
     limite = hoy + datetime.timedelta(days=5) 
     mensajes = []
-    if df.empty: return mensajes
+    
+    # Acumuladores
+    total_vencido = 0.0
+    total_por_vencer = 0.0
+    total_por_cobrar = 0.0
+    
+    if df.empty: return mensajes, 0, 0, 0
+
+    # 1. Buscar Pagos Pendientes (Gastos)
     pendientes = df[(df['tipo'] == 'GASTO') & (df['pagado'] == False)].copy()
     for i, r in pendientes.iterrows():
         try:
             f_pago = pd.to_datetime(r['fecha_pago']).date()
-            if f_pago < hoy: mensajes.append(f"🚨 **VENCIDO:** {r['tipo_gasto']} ({formato_moneda_visual(r['monto'], r['moneda'])}) - Venció el {f_pago.strftime('%d/%m')}")
+            # Convertimos a ARS para sumar todo junto
+            monto_real = r['monto'] * dolar_val if r['moneda'] == 'USD' else r['monto']
+            
+            if f_pago < hoy:
+                mensajes.append(f"🚨 **VENCIDO:** {r['tipo_gasto']} ({formato_moneda_visual(r['monto'], r['moneda'])}) - {f_pago.strftime('%d/%m')}")
+                total_vencido += monto_real
             elif hoy <= f_pago <= limite:
                 dias = (f_pago - hoy).days
                 txt = "HOY" if dias == 0 else f"en {dias} días"
                 mensajes.append(f"⚠️ **Vence {txt}:** {r['tipo_gasto']} ({formato_moneda_visual(r['monto'], r['moneda'])})")
+                total_por_vencer += monto_real
         except: pass
+
+    # 2. Buscar Cobros (Ingresos)
     ingresos = df[(df['tipo'] == 'GANANCIA')].copy()
     keywords = ['sueldo', 'salario', 'honorarios', 'cobro', 'adelanto', 'quincena']
     for i, r in ingresos.iterrows():
         try:
             f_cobro = pd.to_datetime(r['fecha_pago']).date()
+            monto_real = r['monto'] * dolar_val if r['moneda'] == 'USD' else r['monto']
+            
             if any(k in str(r['tipo_gasto']).lower() for k in keywords) and (hoy <= f_cobro <= limite):
                 dias = (f_cobro - hoy).days
                 txt = "HOY" if dias == 0 else f"en {dias} días"
                 mensajes.append(f"💵 **Cobras {txt}:** {r['tipo_gasto']} ({formato_moneda_visual(r['monto'], r['moneda'])})")
+                total_por_cobrar += monto_real
         except: pass
-    return mensajes
+        
+    return mensajes, total_vencido, total_por_vencer, total_por_cobrar
 
 # --- BASE DE DATOS ---
 def get_db_connection():
@@ -330,13 +351,18 @@ st.title("CONTABILIDAD PERSONAL V5")
 tab1, tab2, tab3, tab4, tab5 = st.tabs(["📊 DASHBOARD", "💰 INVERSIONES", "🔮 PREDICCIONES", "⚙️ CONFIGURACIÓN", "📉 DEUDAS"])
 
 with tab1:
-    alertas = generar_alertas(df_all)
+    alertas, t_vencido, t_vencer, t_cobrar = generar_alertas(df_all, dolar_val)
     if alertas:
         with st.expander(f"🔔 Tienes {len(alertas)} Avisos Importantes", expanded=True):
             for a in alertas:
                 if "VENCIDO" in a: st.error(a)
                 elif "Cobras" in a: st.success(a)
                 else: st.warning(a)
+            st.markdown("---")
+            k1, k2, k3 = st.columns(3)
+            k1.metric("🔴 Total Vencido", formato_moneda_visual(t_vencido, "ARS"))
+            k2.metric("⚠️ Total a Vencer", formato_moneda_visual(t_vencer, "ARS"))
+            k3.metric("💵 Total a Cobrar", formato_moneda_visual(t_cobrar, "ARS"))
 
     st.info(f"Dolar Blue: {formato_moneda_visual(dolar_val, 'ARS')} {dolar_info}")
     df_filtrado = df_all[df_all['mes'] == mes_global].copy()
@@ -463,16 +489,13 @@ with tab3: # PREDICCIONES
 
 with tab4: # CONFIGURACIÓN Y GRUPOS
     st.header("⚙️ Configuración")
-    
-    # --- GESTIÓN DE GRUPOS (NUEVO) ---
     st.subheader("📂 Administrar Grupos")
     c1, c2 = st.columns(2)
     with c1:
         with st.form("nuevo_grupo_form"):
             ng = st.text_input("Nuevo Grupo").upper()
-            if st.form_submit_button("Crear"):
-                if ng:
-                    conn=get_db_connection();c=conn.cursor();c.execute("INSERT INTO grupos (nombre) VALUES (%s) ON CONFLICT DO NOTHING",(ng,));conn.commit();conn.close();st.success(f"Creado {ng}");st.rerun()
+            if st.form_submit_button("Crear") and ng:
+                conn=get_db_connection();c=conn.cursor();c.execute("INSERT INTO grupos (nombre) VALUES (%s) ON CONFLICT DO NOTHING",(ng,));conn.commit();conn.close();st.success(f"Creado {ng}");st.rerun()
     with c2:
         with st.form("borrar_grupo_form"):
             gb = st.selectbox("Borrar Grupo", grupos_db)
