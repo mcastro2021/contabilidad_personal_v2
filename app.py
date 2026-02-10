@@ -105,26 +105,24 @@ def procesar_monto_input(t):
     try: return float(str(t).strip().replace("$","").replace("US","").replace(" ","").replace(".","").replace(",", ".")) if not isinstance(t, (int, float)) else float(t)
     except: return 0.0
 
-# --- FUNCIÓN DE ALERTAS ACTUALIZADA (CON SUMAS) ---
+# --- FUNCIÓN DE ALERTAS ---
 def generar_alertas(df, dolar_val):
     hoy = datetime.date.today()
     limite = hoy + datetime.timedelta(days=5) 
     mensajes = []
     
-    # Acumuladores
     total_vencido = 0.0
     total_por_vencer = 0.0
     total_por_cobrar = 0.0
     
     if df.empty: return mensajes, 0, 0, 0
 
-    # 1. Buscar Pagos Pendientes (Gastos)
+    # 1. Buscar Pagos Pendientes (Gastos NO pagados)
     pendientes = df[(df['tipo'] == 'GASTO') & (df['pagado'] == False)].copy()
     for i, r in pendientes.iterrows():
         try:
             f_pago = pd.to_datetime(r['fecha_pago']).date()
-            # Convertimos a ARS para sumar todo junto
-            monto_real = r['monto'] * dolar_val if r['moneda'] == 'USD' else r['monto']
+            monto_real = float(r['monto']) * dolar_val if r['moneda'] == 'USD' else float(r['monto'])
             
             if f_pago < hoy:
                 mensajes.append(f"🚨 **VENCIDO:** {r['tipo_gasto']} ({formato_moneda_visual(r['monto'], r['moneda'])}) - {f_pago.strftime('%d/%m')}")
@@ -136,14 +134,16 @@ def generar_alertas(df, dolar_val):
                 total_por_vencer += monto_real
         except: pass
 
-    # 2. Buscar Cobros (Ingresos)
-    ingresos = df[(df['tipo'] == 'GANANCIA')].copy()
+    # 2. Buscar Cobros Pendientes (Ingresos NO pagados)
+    ingresos = df[(df['tipo'] == 'GANANCIA') & (df['pagado'] == False)].copy()
     keywords = ['sueldo', 'salario', 'honorarios', 'cobro', 'adelanto', 'quincena']
+    
     for i, r in ingresos.iterrows():
         try:
             f_cobro = pd.to_datetime(r['fecha_pago']).date()
-            monto_real = r['monto'] * dolar_val if r['moneda'] == 'USD' else r['monto']
+            monto_real = float(r['monto']) * dolar_val if r['moneda'] == 'USD' else float(r['monto'])
             
+            # Verificamos palabra clave y fecha
             if any(k in str(r['tipo_gasto']).lower() for k in keywords) and (hoy <= f_cobro <= limite):
                 dias = (f_cobro - hoy).days
                 txt = "HOY" if dias == 0 else f"en {dias} días"
@@ -401,6 +401,19 @@ with tab1:
         df_tabla['pagado'] = df_tabla['pagado'].fillna(False).astype(bool)
         df_tabla['estado'] = df_tabla['pagado'].apply(lambda x: "✅" if x else "⏳")
         
+        # --- CONFIGURACIÓN DE COLUMNAS ACTUALIZADA ---
+        cols = ["estado", "tipo_gasto", "contrato", "monto_vis", "cuota", "forma_pago", "fecha_pago", "pagado"]
+        cfg = {
+            "estado": st.column_config.TextColumn("Estado", width="small"),
+            "tipo_gasto": st.column_config.TextColumn("Tipo de Gasto"),
+            "contrato": st.column_config.TextColumn("Contrato"),
+            "monto_vis": st.column_config.TextColumn("Monto"),
+            "cuota": st.column_config.TextColumn("Cuota"),
+            "forma_pago": st.column_config.TextColumn("Forma de Pago"),
+            "fecha_pago": st.column_config.DateColumn("Fecha de Pago", format="DD/MM/YYYY"),
+            "pagado": st.column_config.CheckboxColumn("Pagado")
+        }
+
         st.markdown("---")
         def style_fn(row): return ['background-color: #1c3323' if row['pagado'] else ''] * len(row)
         selected = []
@@ -413,7 +426,7 @@ with tab1:
                     with st.container():
                         st.subheader(f"📂 {grp}")
                         dfg = dft[dft['grupo'] == grp].sort_values(by=['pagado', 'fecha_pago'], ascending=[True, True])
-                        s = st.dataframe(dfg[["estado", "tipo_gasto", "contrato", "monto_vis", "cuota", "forma_pago", "fecha_pago", "pagado"]].style.apply(style_fn, axis=1), use_container_width=True, hide_index=True, on_select="rerun", selection_mode="multi-row", key=f"t_{gt}_{grp}")
+                        s = st.dataframe(dfg[cols].style.apply(style_fn, axis=1), column_config=cfg, use_container_width=True, hide_index=True, on_select="rerun", selection_mode="multi-row", key=f"t_{gt}_{grp}")
                         st.markdown(f"**📉 Total {grp}: {formato_moneda_visual(dfg['m_ars_v'].sum(), 'ARS')}**")
                         if s.selection.rows:
                             for i in s.selection.rows: selected.append(dfg.iloc[i])
@@ -446,47 +459,6 @@ with tab1:
                 c.execute("DELETE FROM movimientos WHERE id IN %s", (tuple([int(x['id']) for x in selected]),))
                 conn.commit(); conn.close(); actualizar_saldos(mes_global); st.rerun()
 
-with tab2: # INVERSIONES
-    st.header("💰 Inversiones")
-    with st.expander("➕ NUEVA", expanded=False):
-        with st.form("inv"):
-            c1,c2,c3 = st.columns(3); t = c1.selectbox("Tipo", ["Plazo Fijo", "Billetera (FCI)"]); e = c2.text_input("Entidad"); m = c3.text_input("Monto", "0,00")
-            c4,c5,c6 = st.columns(3); tn = c4.number_input("TNA %", 0.0, 300.0, 40.0); f = c5.date_input("Inicio", datetime.date.today()); p = c6.number_input("Días", 30, 365, 30)
-            if st.form_submit_button("Crear"):
-                conn = get_db_connection(); c = conn.cursor(); c.execute("INSERT INTO inversiones (tipo, entidad, monto_inicial, tna, fecha_inicio, plazo_dias, estado) VALUES (%s,%s,%s,%s,%s,%s,'ACTIVA')", (t, e, procesar_monto_input(m), tn, str(f), p))
-                conn.commit(); conn.close(); st.rerun()
-    conn = get_db_connection(); dfi = pd.read_sql("SELECT * FROM inversiones WHERE estado='ACTIVA'", conn); conn.close()
-    if not dfi.empty:
-        tot = dfi['monto_inicial'].sum(); gan = 0.0
-        for i, r in dfi.iterrows():
-            dt = max(0, (datetime.date.today() - pd.to_datetime(r['fecha_inicio']).date()).days)
-            with st.container(border=True):
-                c1, c2 = st.columns([4, 1])
-                fin = r['monto_inicial'] + (r['monto_inicial']*(r['tna']/100)*(r['plazo_dias']/365)) if r['tipo']=="Plazo Fijo" else r['monto_inicial'] * ((1 + ((r['tna']/100)/365))**dt)
-                c1.markdown(f"**{r['entidad']}** ({r['tipo']})"); c1.metric("Capital", formato_moneda_visual(r['monto_inicial'],"ARS"), delta=formato_moneda_visual(fin-r['monto_inicial'],"ARS"))
-                if c2.button("Fin", key=f"f{r['id']}"): 
-                    conn=get_db_connection();c=conn.cursor();c.execute("UPDATE inversiones SET estado='FINALIZADA' WHERE id=%s",(r['id'],));conn.commit();conn.close();st.rerun()
-        st.info(f"Capital Total: {formato_moneda_visual(tot,'ARS')}")
-
-with tab3: # PREDICCIONES
-    st.header("🔮 Tendencias")
-    df_base = df_all[df_all['tipo'] == 'GASTO'].copy()
-    if not df_base.empty:
-        df_base['monto_calc'] = df_base.apply(lambda x: x['monto'] * dolar_val if x['moneda'] == 'USD' else x['monto'], axis=1)
-        seleccion = st.selectbox("Analizar:", ["TOTAL GENERAL"] + sorted(df_base['grupo'].unique().tolist()))
-        df_ai = df_base if seleccion == "TOTAL GENERAL" else df_base[df_base['grupo'] == seleccion]
-        df_ai['mes_idx'] = df_ai['mes'].map({m: i for i, m in enumerate(LISTA_MESES_LARGA)})
-        df_tendencia = df_ai.groupby(['mes_idx', 'mes'])['monto_calc'].sum().reset_index().sort_values('mes_idx')
-        if len(df_tendencia) >= 2:
-            model = LinearRegression(); model.fit(df_tendencia['mes_idx'].values.reshape(-1, 1), df_tendencia['monto_calc'].values)
-            pred = max(0, model.predict([[df_tendencia['mes_idx'].max() + 1]])[0])
-            st.metric("Proyección Próximo Mes", formato_moneda_visual(pred, "ARS"))
-            fig = go.Figure()
-            fig.add_trace(go.Bar(x=df_tendencia['mes'], y=df_tendencia['monto_calc'], name='Real'))
-            fig.add_trace(go.Scatter(x=df_tendencia['mes'], y=model.predict(df_tendencia['mes_idx'].values.reshape(-1, 1)), mode='lines', name='Tendencia'))
-            st.plotly_chart(fig, use_container_width=True)
-        else: st.warning("Faltan datos")
-
 with tab4: # CONFIGURACIÓN Y GRUPOS
     st.header("⚙️ Configuración")
     st.subheader("📂 Administrar Grupos")
@@ -513,10 +485,20 @@ with tab4: # CONFIGURACIÓN Y GRUPOS
                 for m in md:
                     for g in gs:
                         r=dfm[dfm['tipo_gasto']==g].iloc[0]
-                        c.execute("INSERT INTO movimientos (fecha,mes,tipo,grupo,tipo_gasto,contrato,cuota,monto,moneda,forma_pago,fecha_pago,pagado) VALUES (%s,%s,%s,%s,%s,%s,'1/1',%s,%s,%s,%s,FALSE)", (str(datetime.date.today()),m,r['tipo'],r['grupo'],r['tipo_gasto'],r['contrato'],r['monto'],r['moneda'],r['forma_pago'],str(datetime.date.today())))
+                        c.execute("INSERT INTO movimientos (fecha,mes,tipo,grupo,tipo_gasto,contrato,cuota,monto,moneda,forma_pago,fecha_pago,pagado) VALUES (%s,%s,%s,%s,%s,%s,'1/1',%s,%s,%s,%s,FALSE)", (str(datetime.date.today()),m,r['tipo'],r['grupo'],r['tipo_gasto'],r['contrato'],float(r['monto']),r['moneda'],r['forma_pago'],str(datetime.date.today())))
                 conn.commit();conn.close();st.success("Replicado")
     
     st.download_button("📦 BACKUP SQL", generar_backup_sql(), "backup.sql")
+    
+    c1,c2,c3 = st.columns(3); ms=c1.selectbox("Desde", LISTA_MESES_LARGA); md=c2.selectbox("Hasta", ["TODO"]+LISTA_MESES_LARGA)
+    if c3.button("Clonar Mes"):
+        conn=get_db_connection();c=conn.cursor();df=pd.read_sql(f"SELECT * FROM movimientos WHERE mes='{ms}'", conn)
+        tgs=[m for m in LISTA_MESES_LARGA if m.split(' ')[1]==ms.split(' ')[1]] if md=="TODO" else [md]
+        for t in tgs:
+            if t==ms: continue
+            c.execute("DELETE FROM movimientos WHERE mes=%s",(t,))
+            for i,r in df.iterrows(): c.execute("INSERT INTO movimientos (fecha,mes,tipo,grupo,tipo_gasto,contrato,cuota,monto,moneda,forma_pago,fecha_pago) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)", (str(datetime.date.today()),t,r['tipo'],r['grupo'],r['tipo_gasto'],r['contrato'],r['cuota'],float(r['monto']),r['moneda'],r['forma_pago'],r['fecha_pago']))
+        conn.commit();conn.close();st.success("Hecho");st.rerun()
 
 with tab5: # DEUDAS
     st.header("📉 Deudas"); c1,c2=st.columns([1,2]); conn=get_db_connection(); c=conn.cursor()
