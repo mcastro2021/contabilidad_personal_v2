@@ -135,16 +135,18 @@ def generar_alertas(df, dolar_val):
         except: pass
 
     # 2. Buscar Cobros Pendientes (Ingresos NO pagados)
-    ingresos = df[(df['tipo'] == 'GANANCIA') & (df['pagado'] == False)].copy()
-    keywords = ['sueldo', 'salario', 'honorarios', 'cobro', 'adelanto', 'quincena']
+    # CORRECCIÓN: Ignoramos explícitamente "Ahorro Mes Anterior" porque es un balance del sistema, no un cobro.
+    ingresos = df[(df['tipo'] == 'GANANCIA') & (df['pagado'] == False) & (df['tipo_gasto'] != 'Ahorro Mes Anterior')].copy()
     
     for i, r in ingresos.iterrows():
         try:
             f_cobro = pd.to_datetime(r['fecha_pago']).date()
             monto_real = float(r['monto']) * dolar_val if r['moneda'] == 'USD' else float(r['monto'])
             
-            # Verificamos palabra clave y fecha
-            if any(k in str(r['tipo_gasto']).lower() for k in keywords) and (hoy <= f_cobro <= limite):
+            if f_cobro < hoy:
+                mensajes.append(f"⏳ **Cobro Atrasado:** {r['tipo_gasto']} ({formato_moneda_visual(r['monto'], r['moneda'])}) - Era el {f_cobro.strftime('%d/%m')}")
+                total_por_cobrar += monto_real
+            elif hoy <= f_cobro <= limite:
                 dias = (f_cobro - hoy).days
                 txt = "HOY" if dias == 0 else f"en {dias} días"
                 mensajes.append(f"💵 **Cobras {txt}:** {r['tipo_gasto']} ({formato_moneda_visual(r['monto'], r['moneda'])})")
@@ -233,8 +235,11 @@ def actualizar_saldos(mes):
             saldo = c.fetchone()[0] or 0.0
             c.execute("SELECT id FROM movimientos WHERE mes=%s AND tipo_gasto='Ahorro Mes Anterior'", (ms,))
             r = c.fetchone()
-            if r: c.execute("UPDATE movimientos SET monto=%s WHERE id=%s", (saldo, r[0]))
-            else: c.execute("INSERT INTO movimientos (fecha, mes, tipo, grupo, tipo_gasto, cuota, monto, moneda, forma_pago, fecha_pago) VALUES (%s,%s,'GANANCIA','AHORRO MANUEL','Ahorro Mes Anterior','1/1',%s,'ARS','Automático',%s)", (str(datetime.date.today()), ms, saldo, str(datetime.date.today())))
+            # CORRECCIÓN: Los ahorros automáticos se graban como pagado=TRUE para que no generen alertas
+            if r: 
+                c.execute("UPDATE movimientos SET monto=%s, pagado=TRUE WHERE id=%s", (saldo, r[0]))
+            else: 
+                c.execute("INSERT INTO movimientos (fecha, mes, tipo, grupo, tipo_gasto, cuota, monto, moneda, forma_pago, fecha_pago, pagado) VALUES (%s,%s,'GANANCIA','AHORRO MANUEL','Ahorro Mes Anterior','1/1',%s,'ARS','Automático',%s, TRUE)", (str(datetime.date.today()), ms, saldo, str(datetime.date.today())))
             conn.commit()
         conn.close()
     except: pass
@@ -356,7 +361,7 @@ with tab1:
         with st.expander(f"🔔 Tienes {len(alertas)} Avisos Importantes", expanded=True):
             for a in alertas:
                 if "VENCIDO" in a: st.error(a)
-                elif "Cobras" in a: st.success(a)
+                elif "Cobras" in a or "Cobro Atrasado" in a: st.success(a)
                 else: st.warning(a)
             st.markdown("---")
             k1, k2, k3 = st.columns(3)
@@ -401,7 +406,6 @@ with tab1:
         df_tabla['pagado'] = df_tabla['pagado'].fillna(False).astype(bool)
         df_tabla['estado'] = df_tabla['pagado'].apply(lambda x: "✅" if x else "⏳")
         
-        # --- CONFIGURACIÓN DE COLUMNAS ACTUALIZADA ---
         cols = ["estado", "tipo_gasto", "contrato", "monto_vis", "cuota", "forma_pago", "fecha_pago", "pagado"]
         cfg = {
             "estado": st.column_config.TextColumn("Estado", width="small"),
