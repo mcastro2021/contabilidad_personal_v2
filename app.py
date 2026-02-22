@@ -68,16 +68,16 @@ def enviar_notificacion(asunto, mensaje):
         logger.error(f"Fallo envío email: {e}")
 
 # --- GENERADOR DE MESES ---
+MESES_NOMBRES = ["Enero", "Febrero", "Marzo", "Abril", "Mayo", "Junio", "Julio", "Agosto", "Septiembre", "Octubre", "Noviembre", "Diciembre"]
+
 def generar_lista_meses(start_year=2026, end_year=2035):
-    meses = ["Enero", "Febrero", "Marzo", "Abril", "Mayo", "Junio", "Julio", "Agosto", "Septiembre", "Octubre", "Noviembre", "Diciembre"]
-    return [f"{m} {a}" for a in range(start_year, end_year + 1) for m in meses]
+    return [f"{m} {a}" for a in range(start_year, end_year + 1) for m in MESES_NOMBRES]
 
 LISTA_MESES_LARGA = generar_lista_meses()
 
 def obtener_indice_mes_actual():
     hoy = datetime.date.today()
-    meses_es = ["Enero", "Febrero", "Marzo", "Abril", "Mayo", "Junio", "Julio", "Agosto", "Septiembre", "Octubre", "Noviembre", "Diciembre"]
-    nombre_mes_actual = f"{meses_es[hoy.month - 1]} {hoy.year}"
+    nombre_mes_actual = f"{MESES_NOMBRES[hoy.month - 1]} {hoy.year}"
     if nombre_mes_actual in LISTA_MESES_LARGA: return LISTA_MESES_LARGA.index(nombre_mes_actual)
     return 0
 
@@ -117,7 +117,7 @@ def generar_alertas(df, dolar_val):
     
     if df.empty: return mensajes, 0, 0, 0
 
-    # 1. Buscar Pagos Pendientes (Gastos NO pagados)
+    # 1. Buscar Pagos Pendientes (Gastos)
     pendientes = df[(df['tipo'] == 'GASTO') & (df['pagado'] == False)].copy()
     for i, r in pendientes.iterrows():
         try:
@@ -134,8 +134,7 @@ def generar_alertas(df, dolar_val):
                 total_por_vencer += monto_real
         except: pass
 
-    # 2. Buscar Cobros Pendientes (Ingresos NO pagados)
-    # CORRECCIÓN: Ignoramos explícitamente "Ahorro Mes Anterior" porque es un balance del sistema, no un cobro.
+    # 2. Buscar Cobros Pendientes (Ingresos)
     ingresos = df[(df['tipo'] == 'GANANCIA') & (df['pagado'] == False) & (df['tipo_gasto'] != 'Ahorro Mes Anterior')].copy()
     
     for i, r in ingresos.iterrows():
@@ -235,11 +234,9 @@ def actualizar_saldos(mes):
             saldo = c.fetchone()[0] or 0.0
             c.execute("SELECT id FROM movimientos WHERE mes=%s AND tipo_gasto='Ahorro Mes Anterior'", (ms,))
             r = c.fetchone()
-            # CORRECCIÓN: Los ahorros automáticos se graban como pagado=TRUE para que no generen alertas
-            if r: 
-                c.execute("UPDATE movimientos SET monto=%s, pagado=TRUE WHERE id=%s", (saldo, r[0]))
-            else: 
-                c.execute("INSERT INTO movimientos (fecha, mes, tipo, grupo, tipo_gasto, cuota, monto, moneda, forma_pago, fecha_pago, pagado) VALUES (%s,%s,'GANANCIA','AHORRO MANUEL','Ahorro Mes Anterior','1/1',%s,'ARS','Automático',%s, TRUE)", (str(datetime.date.today()), ms, saldo, str(datetime.date.today())))
+            # Los ahorros automáticos se graban como pagado=TRUE
+            if r: c.execute("UPDATE movimientos SET monto=%s, pagado=TRUE WHERE id=%s", (saldo, r[0]))
+            else: c.execute("INSERT INTO movimientos (fecha, mes, tipo, grupo, tipo_gasto, cuota, monto, moneda, forma_pago, fecha_pago, pagado) VALUES (%s,%s,'GANANCIA','AHORRO MANUEL','Ahorro Mes Anterior','1/1',%s,'ARS','Automático',%s, TRUE)", (str(datetime.date.today()), ms, saldo, str(datetime.date.today())))
             conn.commit()
         conn.close()
     except: pass
@@ -287,10 +284,29 @@ with st.sidebar:
 
     st.header("📅 Configuración")
     mes_global = st.selectbox("Mes de Trabajo:", LISTA_MESES_LARGA, index=INDICE_MES_ACTUAL)
+    
     st.divider()
+
+    # --- LÓGICA DE FECHAS DINÁMICA ---
+    # Calculamos qué fecha mostrar en el formulario de carga según el mes seleccionado en "Mes de Trabajo"
+    partes = mes_global.split(" ")
+    nombre_mes_seleccionado = partes[0]
+    anio_seleccionado = int(partes[1])
+    # Convertimos nombre a número (1-12)
+    mes_num_seleccionado = MESES_NOMBRES.index(nombre_mes_seleccionado) + 1
+    
+    hoy_real = datetime.date.today()
+    
+    # Si el mes seleccionado es el actual, usamos la fecha de hoy.
+    # Si es otro mes, usamos el día 1 de ese mes.
+    if hoy_real.month == mes_num_seleccionado and hoy_real.year == anio_seleccionado:
+        fecha_default = hoy_real
+    else:
+        fecha_default = datetime.date(anio_seleccionado, mes_num_seleccionado, 1)
 
     st.header("📥 Cargar Nuevo")
     with st.form("alta_movimiento"):
+        # Selectbox sincronizado con mes_global por defecto
         mes_carga = st.selectbox("📅 MES:", LISTA_MESES_LARGA, index=LISTA_MESES_LARGA.index(mes_global)) 
         t_sel = st.selectbox("TIPO", ["GASTO", "GANANCIA"])
         g_sel = st.selectbox("GRUPO", grupos_db)
@@ -298,7 +314,8 @@ with st.sidebar:
         con = c_con.text_input("CONCEPTO"); cont = c_cont.text_input("CUENTA O CONTRATO")
         c1, c2 = st.columns(2); c_act = c1.number_input("Cuota", 1, 300, 1); c_tot = c2.number_input("Total", 1, 300, 1)
         m_inp = st.text_input("MONTO", "0,00"); mon = st.radio("MONEDA", ["ARS", "USD"], horizontal=True)
-        pag = st.selectbox("PAGO", OPCIONES_PAGO); fec = st.date_input("FECHA", datetime.date.today())
+        # Aquí usamos la fecha_default calculada arriba
+        pag = st.selectbox("PAGO", OPCIONES_PAGO); fec = st.date_input("FECHA", fecha_default)
         ya = st.checkbox("¿Pagado?")
         
         if st.form_submit_button("GRABAR"):
