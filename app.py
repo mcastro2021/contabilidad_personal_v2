@@ -15,6 +15,7 @@ from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 import calendar
 import logging
+import numpy as np
 
 # --- IMPORTACIÓN SEGURA DE IA ---
 try:
@@ -480,6 +481,121 @@ with tab1:
                 c.execute("DELETE FROM movimientos WHERE id IN %s", (tuple([int(x['id']) for x in selected]),))
                 conn.commit(); conn.close(); actualizar_saldos(mes_global); st.rerun()
 
+with tab2: # INVERSIONES
+    st.header("💰 Inversiones")
+    conn = get_db_connection()
+    df_inv = pd.read_sql("SELECT * FROM inversiones WHERE estado='ACTIVA' ORDER BY fecha_inicio DESC", conn)
+    conn.close()
+
+    with st.form("nueva_inversion"):
+        st.subheader("➕ Nueva Inversión")
+        ci1, ci2 = st.columns(2)
+        tipo_inv = ci1.selectbox("Tipo", ["Plazo Fijo", "FCI", "Cripto", "Acciones", "Bono", "Otro"])
+        entidad_inv = ci2.text_input("Entidad / Banco")
+        ci3, ci4, ci5 = st.columns(3)
+        monto_inv = ci3.text_input("Monto Inicial", "0,00")
+        moneda_inv = ci4.selectbox("Moneda", ["ARS", "USD"])
+        tna_inv = ci5.number_input("TNA (%)", 0.0, 50000.0, 0.0, step=0.5)
+        ci6, ci7 = st.columns(2)
+        plazo_inv = ci6.number_input("Plazo (días)", 1, 3650, 30)
+        fecha_inv = ci7.date_input("Fecha Inicio", datetime.date.today())
+        if st.form_submit_button("💾 Agregar Inversión"):
+            conn = get_db_connection(); c = conn.cursor()
+            c.execute("INSERT INTO inversiones (tipo, entidad, monto_inicial, tna, fecha_inicio, plazo_dias, estado) VALUES (%s,%s,%s,%s,%s,%s,'ACTIVA')",
+                      (tipo_inv, entidad_inv, procesar_monto_input(monto_inv), tna_inv, str(fecha_inv), int(plazo_inv)))
+            conn.commit(); conn.close()
+            st.success("Inversión agregada"); st.rerun()
+
+    st.divider()
+    if df_inv.empty:
+        st.info("No hay inversiones activas registradas.")
+    else:
+        hoy_inv = datetime.date.today()
+        total_capital = 0.0; total_ganancia = 0.0
+        for _, inv in df_inv.iterrows():
+            moneda_i = "ARS"
+            ganancia = inv['monto_inicial'] * (inv['tna'] / 100) * (inv['plazo_dias'] / 365) if inv['tna'] > 0 else 0.0
+            total_capital += inv['monto_inicial'] * (dolar_val if moneda_i == 'USD' else 1)
+            total_ganancia += ganancia * (dolar_val if moneda_i == 'USD' else 1)
+            try:
+                fecha_fin_inv = (pd.to_datetime(inv['fecha_inicio']) + datetime.timedelta(days=int(inv['plazo_dias']))).date()
+                dias_rest = (fecha_fin_inv - hoy_inv).days
+            except:
+                fecha_fin_inv = None; dias_rest = None
+            vencida = dias_rest is not None and dias_rest < 0
+            emoji = "⏰" if vencida else "🔄"
+            with st.expander(f"{emoji} {inv['tipo']} — {inv['entidad']}  |  Capital: {formato_moneda_visual(inv['monto_inicial'], 'ARS')}  |  TNA: {inv['tna']}%", expanded=True):
+                ki1, ki2, ki3, ki4 = st.columns(4)
+                ki1.metric("Capital", formato_moneda_visual(inv['monto_inicial'], 'ARS'))
+                ki2.metric("Ganancia Est.", formato_moneda_visual(ganancia, 'ARS'))
+                ki3.metric("Total Est.", formato_moneda_visual(inv['monto_inicial'] + ganancia, 'ARS'))
+                ki4.metric("Vencimiento", str(fecha_fin_inv) if fecha_fin_inv else "N/A",
+                           delta=f"{'Vencida hace' if vencida else 'Faltan'} {abs(dias_rest)} días" if dias_rest is not None else "")
+                ka1, ka2 = st.columns(2)
+                if ka1.button("Archivar como Cobrada", key=f"arch_inv_{inv['id']}"):
+                    conn = get_db_connection(); c = conn.cursor()
+                    c.execute("UPDATE inversiones SET estado='VENCIDA' WHERE id=%s", (inv['id'],))
+                    conn.commit(); conn.close(); st.rerun()
+                if ka2.button("Eliminar", key=f"del_inv_{inv['id']}"):
+                    conn = get_db_connection(); c = conn.cursor()
+                    c.execute("DELETE FROM inversiones WHERE id=%s", (inv['id'],))
+                    conn.commit(); conn.close(); st.rerun()
+        st.divider()
+        sm1, sm2, sm3 = st.columns(3)
+        sm1.metric("Total Capital (ARS)", formato_moneda_visual(total_capital, 'ARS'))
+        sm2.metric("Total Ganancia Est. (ARS)", formato_moneda_visual(total_ganancia, 'ARS'))
+        sm3.metric("Total Portafolio (ARS)", formato_moneda_visual(total_capital + total_ganancia, 'ARS'))
+
+with tab3: # PREDICCIONES
+    st.header("🔮 Predicciones de Tendencia")
+    if df_all.empty:
+        st.info("No hay datos suficientes para hacer predicciones.")
+    else:
+        df_pred = df_all[df_all['moneda'] == 'ARS'].copy()
+        df_pred['mes_idx'] = df_pred['mes'].apply(lambda m: LISTA_MESES_LARGA.index(m) if m in LISTA_MESES_LARGA else -1)
+        df_pred = df_pred[df_pred['mes_idx'] >= 0]
+        monthly = df_pred.groupby(['mes_idx', 'mes']).apply(
+            lambda g: pd.Series({
+                'ganancias': g[g['tipo'] == 'GANANCIA']['monto'].sum(),
+                'gastos': g[g['tipo'] == 'GASTO']['monto'].sum(),
+            })
+        ).reset_index().sort_values('mes_idx')
+        monthly['saldo'] = monthly['ganancias'] - monthly['gastos']
+
+        if len(monthly) < 2:
+            st.warning("Se necesitan al menos 2 meses de datos históricos en ARS para generar predicciones.")
+        else:
+            X = monthly['mes_idx'].values.reshape(-1, 1)
+            n_fut = st.slider("Meses a predecir:", 3, 12, 6)
+            last_idx = int(monthly['mes_idx'].max())
+            future_idx = [i for i in range(last_idx + 1, last_idx + n_fut + 1) if i < len(LISTA_MESES_LARGA)]
+            future_meses = [LISTA_MESES_LARGA[i] for i in future_idx]
+            pred_data = {'mes': future_meses}
+            for col in ['ganancias', 'gastos', 'saldo']:
+                lr = LinearRegression()
+                lr.fit(X, monthly[col].values)
+                pred_data[col] = np.maximum(lr.predict(np.array(future_idx).reshape(-1, 1)), 0)
+            df_future = pd.DataFrame(pred_data)
+
+            fig_pred = go.Figure()
+            fig_pred.add_trace(go.Bar(x=monthly['mes'], y=monthly['ganancias'], name='Ganancias Históricas', marker_color='#28a745', opacity=0.8))
+            fig_pred.add_trace(go.Bar(x=monthly['mes'], y=monthly['gastos'], name='Gastos Históricos', marker_color='#dc3545', opacity=0.8))
+            fig_pred.add_trace(go.Scatter(x=df_future['mes'], y=df_future['ganancias'], name='Pred. Ganancias', mode='lines+markers', line=dict(dash='dash', color='#28a745', width=2)))
+            fig_pred.add_trace(go.Scatter(x=df_future['mes'], y=df_future['gastos'], name='Pred. Gastos', mode='lines+markers', line=dict(dash='dash', color='#dc3545', width=2)))
+            fig_pred.add_trace(go.Scatter(x=df_future['mes'], y=df_future['saldo'], name='Pred. Saldo', mode='lines+markers', line=dict(dash='dot', color='#ffc107', width=2)))
+            fig_pred.update_layout(barmode='group', title="Histórico + Predicción (Regresión Lineal — ARS)")
+            st.plotly_chart(fig_pred, use_container_width=True)
+
+            st.subheader("Tabla de predicciones")
+            df_show = df_future.copy()
+            df_show.columns = ['Mes', 'Ganancias Est.', 'Gastos Est.', 'Saldo Est.']
+            df_show['Ganancias Est.'] = df_show['Ganancias Est.'].apply(lambda v: formato_moneda_visual(v, 'ARS'))
+            df_show['Gastos Est.'] = df_show['Gastos Est.'].apply(lambda v: formato_moneda_visual(v, 'ARS'))
+            df_show['Saldo Est.'] = df_show['Saldo Est.'].apply(lambda v: formato_moneda_visual(v, 'ARS'))
+            st.dataframe(df_show, hide_index=True, use_container_width=True)
+
+            st.caption("⚠️ Las predicciones son estimaciones basadas en tendencia lineal histórica. No constituyen asesoramiento financiero.")
+
 with tab4: # CONFIGURACIÓN Y GRUPOS
     st.header("⚙️ Configuración")
     st.subheader("📂 Administrar Grupos")
@@ -520,6 +636,31 @@ with tab4: # CONFIGURACIÓN Y GRUPOS
             c.execute("DELETE FROM movimientos WHERE mes=%s",(t,))
             for i,r in df.iterrows(): c.execute("INSERT INTO movimientos (fecha,mes,tipo,grupo,tipo_gasto,contrato,cuota,monto,moneda,forma_pago,fecha_pago) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)", (str(datetime.date.today()),t,r['tipo'],r['grupo'],r['tipo_gasto'],r['contrato'],r['cuota'],float(r['monto']),r['moneda'],r['forma_pago'],r['fecha_pago']))
         conn.commit();conn.close();st.success("Hecho");st.rerun()
+
+    st.divider()
+    st.subheader("🔑 Cambiar Contraseña")
+    with st.form("cambiar_password"):
+        cp1, cp2, cp3 = st.columns(3)
+        pass_actual = cp1.text_input("Contraseña actual", type="password")
+        pass_nueva = cp2.text_input("Nueva contraseña", type="password")
+        pass_conf = cp3.text_input("Confirmar nueva", type="password")
+        if st.form_submit_button("Actualizar Contraseña"):
+            if not pass_actual or not pass_nueva or not pass_conf:
+                st.error("Completá todos los campos.")
+            elif pass_nueva != pass_conf:
+                st.error("La nueva contraseña y la confirmación no coinciden.")
+            elif len(pass_nueva) < 6:
+                st.error("La nueva contraseña debe tener al menos 6 caracteres.")
+            else:
+                conn = get_db_connection(); c = conn.cursor()
+                c.execute("SELECT password FROM users WHERE username=%s", (st.session_state['username'],))
+                row = c.fetchone()
+                if row and check_hashes(pass_actual, row[0]):
+                    c.execute("UPDATE users SET password=%s WHERE username=%s", (make_hashes(pass_nueva), st.session_state['username']))
+                    conn.commit(); st.success("Contraseña actualizada correctamente.")
+                else:
+                    st.error("La contraseña actual es incorrecta.")
+                conn.close()
 
 with tab5: # DEUDAS
     st.header("📉 Deudas"); c1,c2=st.columns([1,2]); conn=get_db_connection(); c=conn.cursor()
