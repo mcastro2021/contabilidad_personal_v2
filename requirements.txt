@@ -7,6 +7,8 @@ psycopg2-binary
 python-dotenv
 scikit-learn
 numpy
+bcrypt
+openpyxl
 openai
 matplotlib
 tabulate
